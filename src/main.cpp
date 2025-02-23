@@ -1,11 +1,26 @@
 #include <Arduino.h>
 #include "SPIFFSManager.h"
+#include <WiFi.h>
+#include <WiFiMulti.h>
 #include <M5UnitLCD.h>
 #include <M5Unified.h>
 #include <nlohmann/json.hpp>
+#include <PubSubClient.h>
 
+#ifndef WIFI_SSID
+#define WIFI_SSID "your_ssid"
+#endif
+
+#ifndef WIFI_PASS
+#define WIFI_PASS "your_password"
+#endif
 
 SPIFFSManager spiffsManager(SPIFFS);
+WiFiClient wifiClient;   
+WiFiMulti wifiMulti;           // Create a WiFi client instance
+PubSubClient mqttClient(wifiClient); // Declare PubSubClient using the WiFi client
+
+long lastReconnectAttempt = 0;
 
 void setup()
 {
@@ -16,7 +31,7 @@ void setup()
   M5.setPrimaryDisplayType({m5::board_t::board_M5UnitLCD});
   M5.Display.setRotation(3); // rotates the display 90 degrees clockwise
 
-  int textsize = M5.Display.height() / 60;
+  int textsize = M5.Display.height() / 50;
   if (textsize == 0)
   {
     textsize = 1;
@@ -35,7 +50,7 @@ void setup()
   if (!spiffsManager.fileExists("/wifi.json"))
   {
     M5.Display.println("wifi.json does not exist");
-    const char* defaultWifi = "[{\"ssid\":\"ssid\",\"password\":\"pass\"}]";
+    const char* defaultWifi = "[{\"ssid\":\"" WIFI_SSID "\",\"password\":\"" WIFI_PASS "\"}]";
     spiffsManager.writeFile("/wifi.json", defaultWifi);
     M5.Display.println("wifi.json created");
     Serial.printf("Default wifi config written: %s\n", defaultWifi);
@@ -69,6 +84,8 @@ void setup()
   // loop wifijson
   for (const auto& network : wifiJSON) {
     Serial.printf("Network SSID: %s\n", network["ssid"].get<std::string>().c_str());
+    
+    wifiMulti.addAP(network["ssid"].get<std::string>().c_str(),network["password"].get<std::string>().c_str());
   }
 
 //print number of wifi networks
@@ -103,8 +120,36 @@ void setup()
 
   // Serial.println("All SPIFFS operations completed successfully!");
 }
+void wifiConnect(){
+  if (wifiMulti.run() ==
+        WL_CONNECTED) {  // If the connection to wifi is established
+                         // successfully.  如果与wifi成功建立连接
+        M5.Display.setCursor(0, 20);
+        M5.Display.print("WiFi connected\n\nSSID:");
+        M5.Display.println(WiFi.SSID());  // Output Network name.  输出网络名称
+        M5.Display.print("RSSI: ");
+        M5.Display.println(WiFi.RSSI());  // Output signal strength.  输出信号强度
+        M5.Display.print("IP address: ");
+        M5.Display.println(WiFi.localIP());  // Output IP Address.  输出IP地址
+        delay(1000);
+        M5.Display.fillRect(0, 20, 180, 300,
+                        BLACK);  // It's equivalent to partial screen clearance.
+                                 // 相当于部分清屏
+    } else {
+        // If the connection to wifi is not established successfully.
+        // 如果没有与wifi成功建立连接
+        M5.Display.print(".");
+        delay(1000);
+    }
+}
+
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  // handle message arrived
+}
 
 void loop()
 {
   // put your main code here, to run repeatedly:
+  wifiConnect();
+
 }
