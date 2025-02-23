@@ -104,15 +104,28 @@ String SPIFFSManager::readFile(const char *path) {
 
 bool SPIFFSManager::fileExists(const char *path) {
     Serial.printf("Checking if file exists: %s\r\n", path);
-    File file = fs_.open(path);
-    if (file) {
-        file.close();
-        Serial.println("- file exists");
-        return true;
-    } else {
-        Serial.println("- file does not exist");
+    
+    if (!fs_.exists(path)) {
+        Serial.println("- path does not exist");
         return false;
     }
+
+    File file = fs_.open(path, "r");
+    if (!file) {
+        Serial.println("- failed to open file");
+        return false;
+    }
+
+    bool isFile = !file.isDirectory();
+    file.close();
+
+    if (isFile) {
+        Serial.println("- file exists and is a regular file");
+    } else {
+        Serial.println("- path exists but is a directory");
+    }
+
+    return isFile;
 }
 
 void SPIFFSManager::writeFile(const char *path, const char *message) {
