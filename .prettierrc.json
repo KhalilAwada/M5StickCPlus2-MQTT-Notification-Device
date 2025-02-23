@@ -1,0 +1,28 @@
+{
+  "printWidth": 120,
+  "tabWidth": 4,
+  "useTabs": false,
+  "semi": true,
+  "singleQuote": true,
+  "trailingComma": "all",
+  "bracketSpacing": true,
+  "jsxBracketSameLine": true,
+  "arrowParens": "always",
+  "proseWrap": "preserve",
+  "htmlWhitespaceSensitivity": "strict",
+  "endOfLine": "lf",
+  "embeddedLanguageFormatting": "auto",
+  "overrides": [
+    {
+      "files": "*.cpp",
+      "options": {
+        "parser": "cpp",
+        "prettier": "@prettier/plugin-cpp",
+        "tabWidth": 4,
+        "useTabs": false,
+        "semi": true,
+        "singleQuote": true
+      }
+    }
+  ]
+}
