@@ -7,6 +7,13 @@
 #include <nlohmann/json.hpp>
 #include <PubSubClient.h>
 
+#ifndef WIFI_SSID
+#define WIFI_SSID "your_ssid"
+#endif
+
+#ifndef WIFI_PASS
+#define WIFI_PASS "your_password"
+#endif
 
 SPIFFSManager spiffsManager(SPIFFS);
 WiFiClient wifiClient;   
@@ -43,7 +50,7 @@ void setup()
   if (!spiffsManager.fileExists("/wifi.json"))
   {
     M5.Display.println("wifi.json does not exist");
-    const char* defaultWifi = "[{\"ssid\":\"KiPhone\",\"password\":\"khalil1223\"}]";
+    const char* defaultWifi = "[{\"ssid\":\"" WIFI_SSID "\",\"password\":\"" WIFI_PASS "\"}]";
     spiffsManager.writeFile("/wifi.json", defaultWifi);
     M5.Display.println("wifi.json created");
     Serial.printf("Default wifi config written: %s\n", defaultWifi);
