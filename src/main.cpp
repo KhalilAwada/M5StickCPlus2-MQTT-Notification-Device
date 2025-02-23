@@ -22,6 +22,9 @@ PubSubClient mqttClient(wifiClient); // Declare PubSubClient using the WiFi clie
 
 long lastReconnectAttempt = 0;
 
+nlohmann::json loadWifiConfig(SPIFFSManager& spiffsManager);
+void wifiConnect();
+
 void setup()
 {
   Serial.begin(115200);
@@ -31,7 +34,7 @@ void setup()
   M5.setPrimaryDisplayType({m5::board_t::board_M5UnitLCD});
   M5.Display.setRotation(3); // rotates the display 90 degrees clockwise
 
-  int textsize = M5.Display.height() / 50;
+  int textsize = M5.Display.height() / 68;
   if (textsize == 0)
   {
     textsize = 1;
@@ -46,40 +49,10 @@ void setup()
     return;
   }
 
-  // Check if wifi file exists
-  if (!spiffsManager.fileExists("/wifi.json"))
-  {
-    M5.Display.println("wifi.json does not exist");
-    const char* defaultWifi = "[{\"ssid\":\"" WIFI_SSID "\",\"password\":\"" WIFI_PASS "\"}]";
-    spiffsManager.writeFile("/wifi.json", defaultWifi);
-    M5.Display.println("wifi.json created");
-    Serial.printf("Default wifi config written: %s\n", defaultWifi);
-  }
-
-  nlohmann::json wifiJSON = nlohmann::json::array();
-
-  // load wifi file
-  String wifis = spiffsManager.readFile("/wifi.json");
-  Serial.printf("Read wifi file content: '%s'\n", wifis.c_str());
   
-  // convert wifis to json
-  if (wifis.length() > 0) {
-    try {
-      wifiJSON = nlohmann::json::parse(wifis.c_str());
-      M5.Display.printf("loaded %d wifi networks\n", wifiJSON.size());
-      
-      // Print each network for debugging
-      for (const auto& network : wifiJSON) {
-        Serial.printf("Network SSID: %s\n", network["ssid"].get<std::string>().c_str());
-      }
-    } catch (const nlohmann::json::exception& e) {
-      Serial.printf("JSON parsing error: %s\n", e.what());
-      M5.Display.println("Error parsing wifi config");
-    }
-  } else {
-    Serial.println("No wifi configuration read");
-    M5.Display.println("No wifi configuration");
-  }
+  // Load WiFi configuration
+  nlohmann::json wifiJSON = loadWifiConfig(spiffsManager);
+
 
   // loop wifijson
   for (const auto& network : wifiJSON) {
@@ -120,6 +93,48 @@ void setup()
 
   // Serial.println("All SPIFFS operations completed successfully!");
 }
+
+
+
+// Add this function implementation after setup()
+nlohmann::json loadWifiConfig(SPIFFSManager& spiffsManager) {
+  nlohmann::json wifiJSON = nlohmann::json::array();
+
+  // Check if wifi file exists
+  if (!spiffsManager.fileExists("/wifi.json")) {
+    M5.Display.println("wifi.json does not exist");
+    const char* defaultWifi = "[{\"ssid\":\"" WIFI_SSID "\",\"password\":\"" WIFI_PASS "\"}]";
+    spiffsManager.writeFile("/wifi.json", defaultWifi);
+    M5.Display.println("wifi.json created");
+    Serial.printf("Default wifi config written: %s\n", defaultWifi);
+  }
+
+  // load wifi file
+  String wifis = spiffsManager.readFile("/wifi.json");
+  Serial.printf("Read wifi file content: '%s'\n", wifis.c_str());
+  
+  // convert wifis to json
+  if (wifis.length() > 0) {
+    try {
+      wifiJSON = nlohmann::json::parse(wifis.c_str());
+      M5.Display.printf("loaded %d wifi networks\n", wifiJSON.size());
+      
+      // Print each network for debugging
+      for (const auto& network : wifiJSON) {
+        Serial.printf("Network SSID: %s\n", network["ssid"].get<std::string>().c_str());
+      }
+    } catch (const nlohmann::json::exception& e) {
+      Serial.printf("JSON parsing error: %s\n", e.what());
+      M5.Display.println("Error parsing wifi config");
+    }
+  } else {
+    Serial.println("No wifi configuration read");
+    M5.Display.println("No wifi configuration");
+  }
+
+  return wifiJSON;
+}
+
 void wifiConnect(){
   if (wifiMulti.run() ==
         WL_CONNECTED) {  // If the connection to wifi is established
