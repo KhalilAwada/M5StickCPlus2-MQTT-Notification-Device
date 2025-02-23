@@ -66,6 +66,11 @@ void setup()
     M5.Display.println("No wifi configuration");
   }
 
+  // loop wifijson
+  for (const auto& network : wifiJSON) {
+    Serial.printf("Network SSID: %s\n", network["ssid"].get<std::string>().c_str());
+  }
+
 //print number of wifi networks
   // M5.Display.printf("loaded %d wifi networks", wifiJSON.size());
 
