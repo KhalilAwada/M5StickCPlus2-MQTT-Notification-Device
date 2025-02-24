@@ -29,3 +29,5 @@ for key, value in env_vars.items():
         print(f"Warning: {key} is not set")
     else:
         os.environ[key] = value
+for key, value in os.environ.items():
+    print(f"±±± exported Environment variable {key}={value}")    
