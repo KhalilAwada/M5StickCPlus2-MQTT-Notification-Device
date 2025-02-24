@@ -7,7 +7,7 @@
 #include <nlohmann/json.hpp>
 #include <PubSubClient.h>
 
-#include "secrets.h"
+// #include "secrets.h"
 
 #ifndef WIFI_SSID
 #define WIFI_SSID "your_ssid"
@@ -50,7 +50,7 @@
 #endif
 
 #ifndef MQTT_RETAIN
-#define bool MQTT_RETAIN false
+#define MQTT_RETAIN false
 #endif
 
 #ifndef MQTT_TLS
@@ -69,9 +69,9 @@
 #define MQTT_TLS_VERSION ssl.PROTOCOL_TLS
 #endif
 
-#ifndef MQTT_KEEPALIVE
-#define MQTT_KEEPALIVE 1000
-#endif
+// #ifndef MQTT_KEEPALIVE
+// #define MQTT_KEEPALIVE 1000
+// #endif
 
 SPIFFSManager spiffsManager(SPIFFS);
 WiFiClient wifiClient;   
@@ -131,7 +131,7 @@ nlohmann::json loadWifiConfig(SPIFFSManager& spiffsManager) {
   Serial.begin(115200); // Ensure Serial is initialized
   nlohmann::json wifiJSON = nlohmann::json::array();
 
-  spiffsManager.deleteFile("/wifi.json");
+  // spiffsManager.deleteFile("/wifi.json");
   // Check if wifi file exists
   if (!spiffsManager.fileExists("/wifi.json")) {
     M5.Display.println("wifi.json does not exist");
@@ -171,6 +171,48 @@ nlohmann::json loadWifiConfig(SPIFFSManager& spiffsManager) {
   return wifiJSON;
 }
 
+void displayWifiStatus() {
+  int iconSize = 20; 
+  int iconX = M5.Display.width() - iconSize; // top right corner x coordinate
+  int iconY = 0;                             // top of the display
+
+  // Clear the icon area in the top-right corner
+  M5.Display.fillRect(iconX, iconY, iconSize, iconSize, BLACK);
+
+  if (WiFi.status() == WL_CONNECTED) {
+      int rssi = WiFi.RSSI();
+      int bars = 0;
+      if (rssi >= -50) bars = 4;
+      else if (rssi >= -60) bars = 3;
+      else if (rssi >= -70) bars = 2;
+      else bars = 1;
+
+      // Draw 4 bars (smaller for the icon area)
+      for (int i = 0; i < 4; i++) {
+          int barWidth = 3; 
+          int spacing = 2;
+          // Calculate x relative to the icon's top-right area
+          int x = iconX + spacing + i * (barWidth + spacing);
+          int baseY = iconY + iconSize - spacing; // bottom of the icon area
+          int barHeight = 2 * (i + 1); // smaller bar height scaling
+          if (i < bars) {
+              M5.Display.fillRect(x, baseY - barHeight, barWidth, barHeight, GREEN);
+          } else {
+              M5.Display.drawRect(x, baseY - barHeight, barWidth, barHeight, WHITE);
+          }
+      }
+  } else {
+      // Draw a red "X" in the icon area when not connected.
+      int padding = 4;
+      int startX = iconX + padding;
+      int startY = iconY + padding;
+      int endX = iconX + iconSize - padding;
+      int endY = iconY + iconSize - padding;
+      M5.Display.drawLine(startX, startY, endX, endY, RED);
+      M5.Display.drawLine(endX, startY, startX, endY, RED);
+  }
+}
+
 bool wifiConnect(){
   bool connected = false;
 
@@ -183,25 +225,31 @@ bool wifiConnect(){
         WL_CONNECTED) {  // If the connection to wifi is established
                          // successfully.  如果与wifi成功建立连接
 
-        M5.Display.setCursor(0, 20);
-        M5.Display.print("WiFi connected\n\nSSID:");
-        M5.Display.println(WiFi.SSID());  // Output Network name.  输出网络名称
-        M5.Display.print("RSSI: ");
-        M5.Display.println(WiFi.RSSI());  // Output signal strength.  输出信号强度
-        M5.Display.print("IP address: ");
-        M5.Display.println(WiFi.localIP());  // Output IP Address.  输出IP地址
-        M5.Display.println(WiFi.dnsIP());  // Output IP Address.  输出IP地址
-        delay(1000);
-        M5.Display.fillRect(0, 20, 180, 300,
-                        BLACK);  // It's equivalent to partial screen clearance.
+        // M5.Display.setCursor(0, 20);
+        // M5.Display.print("WiFi connected\n\nSSID:");
+        // M5.Display.println(WiFi.SSID());  // Output Network name.  输出网络名称
+        // M5.Display.print("RSSI: ");
+        // M5.Display.println(WiFi.RSSI());  // Output signal strength.  输出信号强度
+        // M5.Display.print("IP address: ");
+        // M5.Display.println(WiFi.localIP());  // Output IP Address.  输出IP地址
+        // M5.Display.println(WiFi.dnsIP());  // Output IP Address.  输出IP地址
+        // delay(1000);
+        // M5.Display.fillRect(0, 20, 180, 300,
+        //                 BLACK);  // It's equivalent to partial screen clearance.
                                  // 相当于部分清屏
         connected = true;
         mqttLastReconnectAttempt = 0;
     } else {
         // If the connection to wifi is not established successfully.
         // 如果没有与wifi成功建立连接
-        M5.Display.print(".");
+        // M5.Display.print(".");
         delay(1000);
+    }
+    static unsigned long lastDisplayUpdate = 0;
+    unsigned long currentMillis = millis();
+    if (currentMillis - lastDisplayUpdate >= 10000) { // 10 seconds
+      displayWifiStatus();
+      lastDisplayUpdate = currentMillis;
     }
   return connected;
 }
