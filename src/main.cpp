@@ -90,6 +90,8 @@ void setup()
   Serial.begin(115200);
 
   M5.begin();
+  M5.Power.begin();
+
   sleep(3);
   Serial.println("started ");  
 
@@ -189,11 +191,11 @@ void displayWifiStatus() {
 
       // Draw 4 bars (smaller for the icon area)
       for (int i = 0; i < 4; i++) {
-          int barWidth = 3; 
+          int barWidth = 2; 
           int spacing = 2;
           // Calculate x relative to the icon's top-right area
           int x = iconX + spacing + i * (barWidth + spacing);
-          int baseY = iconY + iconSize - spacing; // bottom of the icon area
+          int baseY = iconY + iconSize - spacing - 6; // bottom of the icon area
           int barHeight = 2 * (i + 1); // smaller bar height scaling
           if (i < bars) {
               M5.Display.fillRect(x, baseY - barHeight, barWidth, barHeight, GREEN);
@@ -210,6 +212,47 @@ void displayWifiStatus() {
       int endY = iconY + iconSize - padding;
       M5.Display.drawLine(startX, startY, endX, endY, RED);
       M5.Display.drawLine(endX, startY, startX, endY, RED);
+  }
+}
+
+void displayBatteryStatus() {
+  // Define icon dimensions
+  int batteryIconWidth = 24; 
+  int batteryIconHeight = 14;
+  // Position battery icon to the left of the WiFi icon.
+  // Assuming the WiFi icon occupies 20 pixels on the far right,
+  // we place the battery icon immediately to its left.
+  int batteryX = M5.Display.width() - batteryIconWidth - 25;
+  int batteryY = 3;
+
+  // Clear battery icon area
+  M5.Display.fillRect(batteryX, batteryY, batteryIconWidth, batteryIconHeight, BLACK);
+
+  // Get battery status
+  std::int32_t batLevel = M5.Power.getBatteryLevel();   // Expected percentage 0-100
+  int16_t batVoltage = M5.Power.getBatteryVoltage();      // Typically in millivolts
+
+  // Draw battery outline (leaving room for a positive terminal)
+  int bodyWidth = batteryIconWidth - 4;
+  int bodyHeight = batteryIconHeight - 4;
+  M5.Display.drawRect(batteryX, batteryY, bodyWidth, bodyHeight, WHITE);
+  // Draw the positive terminal
+  M5.Display.fillRect(batteryX + bodyWidth, batteryY + (bodyHeight / 2) - 2, 3, 4, WHITE);
+
+  // Fill the battery level – fill width proportionally to batLevel%
+  int fillWidth = ((bodyWidth - 2) * batLevel) / 100;
+  M5.Display.fillRect(batteryX + 1, batteryY + 1, fillWidth, bodyHeight - 2, GREEN);
+
+  // Determine "charging" status. (Adjust the threshold as appropriate for your battery.)
+  bool charging = (batVoltage >= 4200);
+
+  if (charging) {
+      // Draw a simple lightning bolt over the battery icon as a charging symbol
+      int centerX = batteryX + bodyWidth / 2;
+      int centerY = batteryY + bodyHeight / 2;
+      // Create a rough lightning bolt shape
+      M5.Display.drawLine(centerX - 4, batteryY + 2, centerX, centerY, YELLOW);
+      M5.Display.drawLine(centerX, centerY, centerX - 2, batteryY + bodyHeight - 2, YELLOW);
   }
 }
 
@@ -249,6 +292,7 @@ bool wifiConnect(){
     unsigned long currentMillis = millis();
     if (currentMillis - lastDisplayUpdate >= 10000) { // 10 seconds
       displayWifiStatus();
+      displayBatteryStatus();
       lastDisplayUpdate = currentMillis;
     }
   return connected;
