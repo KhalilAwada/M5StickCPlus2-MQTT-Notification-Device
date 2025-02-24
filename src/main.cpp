@@ -1,3 +1,6 @@
+/******************************************************************************
+ *                             INCLUDE HEADERS
+ ******************************************************************************/
 #include <Arduino.h>
 #include "SPIFFSManager.h"
 #include <WiFi.h>
@@ -7,8 +10,11 @@
 #include <nlohmann/json.hpp>
 #include <PubSubClient.h>
 
-// #include "secrets.h"
+// #include "secrets.h" // Uncomment if using secret credentials
 
+/******************************************************************************
+ *                           CONFIGURATION MACROS
+ ******************************************************************************/
 #ifndef WIFI_SSID
 #define WIFI_SSID "your_ssid"
 #endif
@@ -22,7 +28,7 @@
 #endif  
 
 #ifndef MQTT_PORT
-#define MQTT_PORT 1886//as integer
+#define MQTT_PORT 1886 // as integer
 #endif
 
 #ifndef MQTT_USERNAME
@@ -69,72 +75,83 @@
 #define MQTT_TLS_VERSION ssl.PROTOCOL_TLS
 #endif
 
-// #ifndef MQTT_KEEPALIVE
-// #define MQTT_KEEPALIVE 1000
-// #endif
-
+/******************************************************************************
+ *                         GLOBAL OBJECTS & VARIABLES
+ ******************************************************************************/
 SPIFFSManager spiffsManager(SPIFFS);
-WiFiClient wifiClient;   
-WiFiMulti wifiMulti;           // Create a WiFi client instance
-PubSubClient mqttClient(wifiClient); // Declare PubSubClient using the WiFi client
+WiFiClient wifiClient;
+WiFiMulti wifiMulti;           // Manages multiple WiFi networks
+PubSubClient mqttClient(wifiClient); // MQTT client using WiFi
 
 long mqttLastReconnectAttempt = 0;
 
+/******************************************************************************
+ *                        FUNCTION PROTOTYPES
+ ******************************************************************************/
 nlohmann::json loadWifiConfig(SPIFFSManager& spiffsManager);
 bool wifiConnect();
 boolean mqttReconnect();
 void mqttCallback(char* topic, byte* payload, unsigned int length);
+void displayWifiStatus();
+void displayBatteryStatus();
 
-void setup()
-{
+/******************************************************************************
+ *                                SETUP
+ ******************************************************************************/
+void setup() {
   Serial.begin(115200);
 
+  // Initialize M5Stack and power management
   M5.begin();
   M5.Power.begin();
 
-  sleep(3);
-  Serial.println("started ");  
+  delay(3000);
+  Serial.println("Started");
 
+  // Configure primary display type and orientation
   M5.setPrimaryDisplayType({m5::board_t::board_M5UnitLCD});
-  M5.Display.setRotation(3); // rotates the display 90 degrees clockwise
+  M5.Display.setRotation(3); // 90° clockwise rotation
 
-  int textsize = M5.Display.height() / 68;
-  if (textsize == 0)
-  {
-    textsize = 1;
+  // Set appropriate text size based on display height
+  int textSize = M5.Display.height() / 68;
+  if (textSize == 0) {
+    textSize = 1;
   }
-  M5.Display.setTextSize(textsize);
+  M5.Display.setTextSize(textSize);
 
   // Initialize SPIFFS
-  if (!SPIFFS.begin(FORMAT_SPIFFS_IF_FAILED))
-  {
+  if (!SPIFFS.begin(FORMAT_SPIFFS_IF_FAILED)) {
     Serial.println("SPIFFS Mount Failed");
     M5.Display.println("SPIFFS Mount Failed");
     return;
   }
 
-  // Load WiFi configuration
+  // Load WiFi configuration from file
   nlohmann::json wifiJSON = loadWifiConfig(spiffsManager);
 
-  // loop wifijson
+  // Add each network from the configuration file
   for (const auto& network : wifiJSON) {
-    Serial.printf("Network SSID: %s\n", network["ssid"].get<std::string>().c_str());
-    
-    wifiMulti.addAP(network["ssid"].get<std::string>().c_str(),network["password"].get<std::string>().c_str());
+    String ssid = network["ssid"].get<std::string>().c_str();
+    String password = network["password"].get<std::string>().c_str();
+    Serial.printf("Network SSID: %s\n", ssid.c_str());
+    wifiMulti.addAP(ssid.c_str(), password.c_str());
   }
 
+  // Setup MQTT server and callback
   mqttClient.setServer(MQTT_HOST, 1883);
   mqttClient.setCallback(mqttCallback);
-
 }
 
-// Add this function implementation after setup()
+/******************************************************************************
+ *                         HELPER FUNCTIONS
+ ******************************************************************************/
+
+// Load WiFi configuration from SPIFFS (JSON file)
 nlohmann::json loadWifiConfig(SPIFFSManager& spiffsManager) {
   Serial.begin(115200); // Ensure Serial is initialized
   nlohmann::json wifiJSON = nlohmann::json::array();
 
-  // spiffsManager.deleteFile("/wifi.json");
-  // Check if wifi file exists
+  // Check if the WiFi configuration file exists
   if (!spiffsManager.fileExists("/wifi.json")) {
     M5.Display.println("wifi.json does not exist");
     const char* defaultWifi = "[{\"ssid\":\"" WIFI_SSID "\",\"password\":\"" WIFI_PASS "\"}]";
@@ -142,22 +159,19 @@ nlohmann::json loadWifiConfig(SPIFFSManager& spiffsManager) {
     M5.Display.println("wifi.json created");
     Serial.printf("Default wifi config written: %s\n", defaultWifi);
     M5.Display.printf("Default wifi config written: %s\n", defaultWifi);
-  }else{
+  } else {
     M5.Display.println("wifi.json exists");
   }
 
-  // load wifi file
+  // Read and parse the WiFi configuration file
   String wifis = spiffsManager.readFile("/wifi.json");
   Serial.printf("Read wifi file content: '%s'\n", wifis.c_str());
-  Serial.printf("Read wifi file content: '%s'\n", wifis);
-  
-  // convert wifis to json
+
   if (wifis.length() > 0) {
     try {
       wifiJSON = nlohmann::json::parse(wifis.c_str());
-      M5.Display.printf("loaded %d wifi networks\n", wifiJSON.size());
-      Serial.printf("Loaded %d wifi networks\n", wifiJSON.dump().size());  
-      // Print each network for debugging
+      M5.Display.printf("Loaded %d wifi networks\n", wifiJSON.size());
+      // Debug: Print each network's SSID
       for (const auto& network : wifiJSON) {
         Serial.printf("Loaded Network SSID: %s\n", network["ssid"].get<std::string>().c_str());
       }
@@ -173,147 +187,116 @@ nlohmann::json loadWifiConfig(SPIFFSManager& spiffsManager) {
   return wifiJSON;
 }
 
+// Display WiFi signal strength icon on the display
 void displayWifiStatus() {
-  int iconSize = 20; 
-  int iconX = M5.Display.width() - iconSize; // top right corner x coordinate
-  int iconY = 0;                             // top of the display
+  int iconSize = 20;
+  int iconX = M5.Display.width() - iconSize; // Top-right corner x-coordinate
+  int iconY = 0;                             // Top of the display
 
-  // Clear the icon area in the top-right corner
+  // Clear the icon area
   M5.Display.fillRect(iconX, iconY, iconSize, iconSize, BLACK);
 
   if (WiFi.status() == WL_CONNECTED) {
-      int rssi = WiFi.RSSI();
-      int bars = 0;
-      if (rssi >= -50) bars = 4;
-      else if (rssi >= -60) bars = 3;
-      else if (rssi >= -70) bars = 2;
-      else bars = 1;
+    int rssi = WiFi.RSSI();
+    int bars = 0;
+    if (rssi >= -50) bars = 4;
+    else if (rssi >= -60) bars = 3;
+    else if (rssi >= -70) bars = 2;
+    else bars = 1;
 
-      // Draw 4 bars (smaller for the icon area)
-      for (int i = 0; i < 4; i++) {
-          int barWidth = 2; 
-          int spacing = 2;
-          // Calculate x relative to the icon's top-right area
-          int x = iconX + spacing + i * (barWidth + spacing);
-          int baseY = iconY + iconSize - spacing - 6; // bottom of the icon area
-          int barHeight = 2 * (i + 1); // smaller bar height scaling
-          if (i < bars) {
-              M5.Display.fillRect(x, baseY - barHeight, barWidth, barHeight, GREEN);
-          } else {
-              M5.Display.drawRect(x, baseY - barHeight, barWidth, barHeight, WHITE);
-          }
+    // Draw WiFi bars
+    for (int i = 0; i < 4; i++) {
+      int barWidth = 2;
+      int spacing = 2;
+      int x = iconX + spacing + i * (barWidth + spacing);
+      int baseY = iconY + iconSize - spacing - 6;
+      int barHeight = 2 * (i + 1);
+      if (i < bars) {
+        M5.Display.fillRect(x, baseY - barHeight, barWidth, barHeight, GREEN);
+      } else {
+        M5.Display.drawRect(x, baseY - barHeight, barWidth, barHeight, WHITE);
       }
+    }
   } else {
-      // Draw a red "X" in the icon area when not connected.
-      int padding = 4;
-      int startX = iconX + padding;
-      int startY = iconY + padding;
-      int endX = iconX + iconSize - padding;
-      int endY = iconY + iconSize - padding;
-      M5.Display.drawLine(startX, startY, endX, endY, RED);
-      M5.Display.drawLine(endX, startY, startX, endY, RED);
+    // Draw a red "X" when not connected
+    int padding = 4;
+    int startX = iconX + padding;
+    int startY = iconY + padding;
+    int endX = iconX + iconSize - padding;
+    int endY = iconY + iconSize - padding;
+    M5.Display.drawLine(startX, startY, endX, endY, RED);
+    M5.Display.drawLine(endX, startY, startX, endY, RED);
   }
 }
 
+// Display battery status icon on the display
 void displayBatteryStatus() {
-  // Define icon dimensions
-  int batteryIconWidth = 24; 
+  int batteryIconWidth = 24;
   int batteryIconHeight = 14;
-  // Position battery icon to the left of the WiFi icon.
-  // Assuming the WiFi icon occupies 20 pixels on the far right,
-  // we place the battery icon immediately to its left.
-  int batteryX = M5.Display.width() - batteryIconWidth - 25;
+  int batteryX = M5.Display.width() - batteryIconWidth - 25; // Positioned to the left of WiFi icon
   int batteryY = 3;
 
   // Clear battery icon area
   M5.Display.fillRect(batteryX, batteryY, batteryIconWidth, batteryIconHeight, BLACK);
 
   // Get battery status
-  std::int32_t batLevel = M5.Power.getBatteryLevel();   // Expected percentage 0-100
-  int16_t batVoltage = M5.Power.getBatteryVoltage();      // Typically in millivolts
+  std::int32_t batLevel = M5.Power.getBatteryLevel();   // Percentage 0-100
+  int16_t batVoltage = M5.Power.getBatteryVoltage();      // In millivolts
 
-  // Draw battery outline (leaving room for a positive terminal)
+  // Draw battery outline
   int bodyWidth = batteryIconWidth - 4;
   int bodyHeight = batteryIconHeight - 4;
   M5.Display.drawRect(batteryX, batteryY, bodyWidth, bodyHeight, WHITE);
   // Draw the positive terminal
   M5.Display.fillRect(batteryX + bodyWidth, batteryY + (bodyHeight / 2) - 2, 3, 4, WHITE);
 
-  // Fill the battery level – fill width proportionally to batLevel%
+  // Fill battery level proportionally
   int fillWidth = ((bodyWidth - 2) * batLevel) / 100;
   M5.Display.fillRect(batteryX + 1, batteryY + 1, fillWidth, bodyHeight - 2, GREEN);
 
-  // Determine "charging" status. (Adjust the threshold as appropriate for your battery.)
+  // Indicate charging if battery voltage is high enough (adjust threshold as needed)
   bool charging = (batVoltage >= 4200);
-
   if (charging) {
-      // Draw a simple lightning bolt over the battery icon as a charging symbol
-      int centerX = batteryX + bodyWidth / 2;
-      int centerY = batteryY + bodyHeight / 2;
-      // Create a rough lightning bolt shape
-      M5.Display.drawLine(centerX - 4, batteryY + 2, centerX, centerY, YELLOW);
-      M5.Display.drawLine(centerX, centerY, centerX - 2, batteryY + bodyHeight - 2, YELLOW);
+    int centerX = batteryX + bodyWidth / 2;
+    int centerY = batteryY + bodyHeight / 2;
+    // Draw a simple lightning bolt as a charging symbol
+    M5.Display.drawLine(centerX - 4, batteryY + 2, centerX, centerY, YELLOW);
+    M5.Display.drawLine(centerX, centerY, centerX - 2, batteryY + bodyHeight - 2, YELLOW);
   }
 }
 
-bool wifiConnect(){
+// Connect to WiFi using the configured networks
+bool wifiConnect() {
   bool connected = false;
 
-  // int n = WiFi.scanNetworks();
-  // Serial.println("Scanned Networks:");
-  // for (int i = 0; i < n; ++i) {
-  //   Serial.printf("SSID: '%s'\n", WiFi.SSID(i).c_str());
-  // }
-  if (wifiMulti.run() ==
-        WL_CONNECTED) {  // If the connection to wifi is established
-                         // successfully.  如果与wifi成功建立连接
+  if (wifiMulti.run() == WL_CONNECTED) { // Successfully connected to WiFi
+    connected = true;
+    mqttLastReconnectAttempt = 0;
+  } else {
+    delay(1000);
+  }
 
-        // M5.Display.setCursor(0, 20);
-        // M5.Display.print("WiFi connected\n\nSSID:");
-        // M5.Display.println(WiFi.SSID());  // Output Network name.  输出网络名称
-        // M5.Display.print("RSSI: ");
-        // M5.Display.println(WiFi.RSSI());  // Output signal strength.  输出信号强度
-        // M5.Display.print("IP address: ");
-        // M5.Display.println(WiFi.localIP());  // Output IP Address.  输出IP地址
-        // M5.Display.println(WiFi.dnsIP());  // Output IP Address.  输出IP地址
-        // delay(1000);
-        // M5.Display.fillRect(0, 20, 180, 300,
-        //                 BLACK);  // It's equivalent to partial screen clearance.
-                                 // 相当于部分清屏
-        connected = true;
-        mqttLastReconnectAttempt = 0;
-    } else {
-        // If the connection to wifi is not established successfully.
-        // 如果没有与wifi成功建立连接
-        // M5.Display.print(".");
-        delay(1000);
-    }
-    static unsigned long lastDisplayUpdate = 0;
-    unsigned long currentMillis = millis();
-    if (currentMillis - lastDisplayUpdate >= 10000) { // 10 seconds
-      displayWifiStatus();
-      displayBatteryStatus();
-      lastDisplayUpdate = currentMillis;
-    }
+  // Update display status every 10 seconds
+  static unsigned long lastDisplayUpdate = 0;
+  unsigned long currentMillis = millis();
+  if (currentMillis - lastDisplayUpdate >= 10000) {
+    displayWifiStatus();
+    displayBatteryStatus();
+    lastDisplayUpdate = currentMillis;
+  }
   return connected;
 }
 
-
+// Reconnect to the MQTT broker if disconnected
 boolean mqttReconnect() {
-  // print out the type of all the variables starting with MQTT_
-
   if (mqttClient.connect(MQTT_CLIENT_ID, MQTT_USERNAME, MQTT_PASSWORD, MQTT_TOPIC, 1, false, "", false)) {
-    // Once connected, publish an announcement...
-    // mqttClient.publish("outTopic","hello world");
-    // ... and resubscribe
+    // Subscribe to the topic once connected
     mqttClient.subscribe(MQTT_TOPIC);
   }
   return mqttClient.connected();
-  return false;
 }
 
-
-// Callback function for handling incoming messages
+// Callback for incoming MQTT messages
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
   Serial.print("Message arrived [");
   Serial.print(topic);
@@ -325,25 +308,24 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   }
   Serial.println(message);
   M5.Display.println(message);
-  // Additional processing (e.g., JSON parsing) can go here
+  // Additional processing (e.g., JSON parsing) can be added here
 }
 
-void loop()
-{
-  // put your main code here, to run repeatedly:
-  if(wifiConnect()){
+/******************************************************************************
+ *                                MAIN LOOP
+ ******************************************************************************/
+void loop() {
+  if (wifiConnect()) {
     if (!mqttClient.connected()) {
       long now = millis();
       if (now - mqttLastReconnectAttempt > 5000) {
         mqttLastReconnectAttempt = now;
-        // Attempt to reconnect
         if (mqttReconnect()) {
           mqttLastReconnectAttempt = 0;
         }
       }
     } else {
-      // Client connected
-  
+      // Process incoming MQTT messages
       mqttClient.loop();
     }
   }
