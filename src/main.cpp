@@ -7,6 +7,8 @@
 #include <nlohmann/json.hpp>
 #include <PubSubClient.h>
 
+#include "secrets.h"
+
 #ifndef WIFI_SSID
 #define WIFI_SSID "your_ssid"
 #endif
@@ -15,21 +17,81 @@
 #define WIFI_PASS "your_password"
 #endif
 
+#ifndef MQTT_HOST
+#define MQTT_HOST "your_mqtt_host"
+#endif  
+
+#ifndef MQTT_PORT
+#define MQTT_PORT 1886//as integer
+#endif
+
+#ifndef MQTT_USERNAME
+#define MQTT_USERNAME "mqtt_username" 
+#endif
+
+#ifndef MQTT_PASSWORD
+#define MQTT_PASSWORD "mqtt_password"
+#endif
+
+#ifndef MQTT_TOPIC
+#define MQTT_TOPIC "mqtt_topic"
+#endif
+
+#ifndef MQTT_CLIENT_ID
+#define MQTT_CLIENT_ID "mqtt_client_id"
+#endif
+
+#ifndef MQTT_CLEAN_SESSION
+#define MQTT_CLEAN_SESSION false
+#endif
+
+#ifndef MQTT_QOS
+#define MQTT_QOS 1
+#endif
+
+#ifndef MQTT_RETAIN
+#define bool MQTT_RETAIN false
+#endif
+
+#ifndef MQTT_TLS
+#define MQTT_TLS true
+#endif
+
+#ifndef MQTT_TLS_INSECURE
+#define MQTT_TLS_INSECURE false
+#endif
+
+#ifndef MQTT_TLS_CERT_REQS
+#define MQTT_TLS_CERT_REQS ssl.CERT_REQUIRED
+#endif
+
+#ifndef MQTT_TLS_VERSION
+#define MQTT_TLS_VERSION ssl.PROTOCOL_TLS
+#endif
+
+#ifndef MQTT_KEEPALIVE
+#define MQTT_KEEPALIVE 1000
+#endif
+
 SPIFFSManager spiffsManager(SPIFFS);
 WiFiClient wifiClient;   
 WiFiMulti wifiMulti;           // Create a WiFi client instance
 PubSubClient mqttClient(wifiClient); // Declare PubSubClient using the WiFi client
 
-long lastReconnectAttempt = 0;
+long mqttLastReconnectAttempt = 0;
 
 nlohmann::json loadWifiConfig(SPIFFSManager& spiffsManager);
-void wifiConnect();
+bool wifiConnect();
+boolean mqttReconnect();
+void mqttCallback(char* topic, byte* payload, unsigned int length);
 
 void setup()
 {
   Serial.begin(115200);
 
   M5.begin();
+  sleep(3);
+  Serial.println("started ");  
 
   M5.setPrimaryDisplayType({m5::board_t::board_M5UnitLCD});
   M5.Display.setRotation(3); // rotates the display 90 degrees clockwise
@@ -49,10 +111,8 @@ void setup()
     return;
   }
 
-  
   // Load WiFi configuration
   nlohmann::json wifiJSON = loadWifiConfig(spiffsManager);
-
 
   // loop wifijson
   for (const auto& network : wifiJSON) {
@@ -61,45 +121,17 @@ void setup()
     wifiMulti.addAP(network["ssid"].get<std::string>().c_str(),network["password"].get<std::string>().c_str());
   }
 
-//print number of wifi networks
-  // M5.Display.printf("loaded %d wifi networks", wifiJSON.size());
+  mqttClient.setServer(MQTT_HOST, 1883);
+  mqttClient.setCallback(mqttCallback);
 
-  // List directory contents
-  // spiffsManager.listDir("/", 0);
-
-  // Write to a file
-  // spiffsManager.writeFile("/hello.txt", "Hello World!");
-
-  // Read from a file
-  // spiffsManager.readFile("/hello.txt");
-
-  // Append to a file
-  // spiffsManager.appendFile("/hello.txt", " This is an appended line.");
-
-  // Rename a file
-  // spiffsManager.renameFile("/hello.txt", "/renamed.txt");
-
-  // Read from the renamed file
-  // spiffsManager.readFile("/renamed.txt");
-
-  // Delete the file
-  // spiffsManager.deleteFile("/renamed.txt");
-
-  // Test file I/O performance
-  // spiffsManager.testFileIO("/test.txt");
-
-  // Clean up the test file
-  // spiffsManager.deleteFile("/test.txt");
-
-  // Serial.println("All SPIFFS operations completed successfully!");
 }
-
-
 
 // Add this function implementation after setup()
 nlohmann::json loadWifiConfig(SPIFFSManager& spiffsManager) {
+  Serial.begin(115200); // Ensure Serial is initialized
   nlohmann::json wifiJSON = nlohmann::json::array();
 
+  spiffsManager.deleteFile("/wifi.json");
   // Check if wifi file exists
   if (!spiffsManager.fileExists("/wifi.json")) {
     M5.Display.println("wifi.json does not exist");
@@ -107,21 +139,25 @@ nlohmann::json loadWifiConfig(SPIFFSManager& spiffsManager) {
     spiffsManager.writeFile("/wifi.json", defaultWifi);
     M5.Display.println("wifi.json created");
     Serial.printf("Default wifi config written: %s\n", defaultWifi);
+    M5.Display.printf("Default wifi config written: %s\n", defaultWifi);
+  }else{
+    M5.Display.println("wifi.json exists");
   }
 
   // load wifi file
   String wifis = spiffsManager.readFile("/wifi.json");
   Serial.printf("Read wifi file content: '%s'\n", wifis.c_str());
+  Serial.printf("Read wifi file content: '%s'\n", wifis);
   
   // convert wifis to json
   if (wifis.length() > 0) {
     try {
       wifiJSON = nlohmann::json::parse(wifis.c_str());
       M5.Display.printf("loaded %d wifi networks\n", wifiJSON.size());
-      
+      Serial.printf("Loaded %d wifi networks\n", wifiJSON.dump().size());  
       // Print each network for debugging
       for (const auto& network : wifiJSON) {
-        Serial.printf("Network SSID: %s\n", network["ssid"].get<std::string>().c_str());
+        Serial.printf("Loaded Network SSID: %s\n", network["ssid"].get<std::string>().c_str());
       }
     } catch (const nlohmann::json::exception& e) {
       Serial.printf("JSON parsing error: %s\n", e.what());
@@ -135,10 +171,18 @@ nlohmann::json loadWifiConfig(SPIFFSManager& spiffsManager) {
   return wifiJSON;
 }
 
-void wifiConnect(){
+bool wifiConnect(){
+  bool connected = false;
+
+  // int n = WiFi.scanNetworks();
+  // Serial.println("Scanned Networks:");
+  // for (int i = 0; i < n; ++i) {
+  //   Serial.printf("SSID: '%s'\n", WiFi.SSID(i).c_str());
+  // }
   if (wifiMulti.run() ==
         WL_CONNECTED) {  // If the connection to wifi is established
                          // successfully.  如果与wifi成功建立连接
+
         M5.Display.setCursor(0, 20);
         M5.Display.print("WiFi connected\n\nSSID:");
         M5.Display.println(WiFi.SSID());  // Output Network name.  输出网络名称
@@ -146,25 +190,69 @@ void wifiConnect(){
         M5.Display.println(WiFi.RSSI());  // Output signal strength.  输出信号强度
         M5.Display.print("IP address: ");
         M5.Display.println(WiFi.localIP());  // Output IP Address.  输出IP地址
+        M5.Display.println(WiFi.dnsIP());  // Output IP Address.  输出IP地址
         delay(1000);
         M5.Display.fillRect(0, 20, 180, 300,
                         BLACK);  // It's equivalent to partial screen clearance.
                                  // 相当于部分清屏
+        connected = true;
+        mqttLastReconnectAttempt = 0;
     } else {
         // If the connection to wifi is not established successfully.
         // 如果没有与wifi成功建立连接
         M5.Display.print(".");
         delay(1000);
     }
+  return connected;
 }
 
+
+boolean mqttReconnect() {
+  // print out the type of all the variables starting with MQTT_
+
+  if (mqttClient.connect(MQTT_CLIENT_ID, MQTT_USERNAME, MQTT_PASSWORD, MQTT_TOPIC, 1, false, "", false)) {
+    // Once connected, publish an announcement...
+    // mqttClient.publish("outTopic","hello world");
+    // ... and resubscribe
+    mqttClient.subscribe(MQTT_TOPIC);
+  }
+  return mqttClient.connected();
+  return false;
+}
+
+
+// Callback function for handling incoming messages
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
-  // handle message arrived
+  Serial.print("Message arrived [");
+  Serial.print(topic);
+  Serial.print("] ");
+  
+  String message;
+  for (unsigned int i = 0; i < length; i++) {
+    message += (char)payload[i];
+  }
+  Serial.println(message);
+  M5.Display.println(message);
+  // Additional processing (e.g., JSON parsing) can go here
 }
 
 void loop()
 {
   // put your main code here, to run repeatedly:
-  wifiConnect();
-
+  if(wifiConnect()){
+    if (!mqttClient.connected()) {
+      long now = millis();
+      if (now - mqttLastReconnectAttempt > 5000) {
+        mqttLastReconnectAttempt = now;
+        // Attempt to reconnect
+        if (mqttReconnect()) {
+          mqttLastReconnectAttempt = 0;
+        }
+      }
+    } else {
+      // Client connected
+  
+      mqttClient.loop();
+    }
+  }
 }

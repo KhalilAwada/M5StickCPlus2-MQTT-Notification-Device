@@ -231,3 +231,34 @@ void SPIFFSManager::testFileIO(const char *path) {
         Serial.println("- failed to open file for reading");
     }
 }
+
+
+
+  // List directory contents
+  // spiffsManager.listDir("/", 0);
+
+  // Write to a file
+  // spiffsManager.writeFile("/hello.txt", "Hello World!");
+
+  // Read from a file
+  // spiffsManager.readFile("/hello.txt");
+
+  // Append to a file
+  // spiffsManager.appendFile("/hello.txt", " This is an appended line.");
+
+  // Rename a file
+  // spiffsManager.renameFile("/hello.txt", "/renamed.txt");
+
+  // Read from the renamed file
+  // spiffsManager.readFile("/renamed.txt");
+
+  // Delete the file
+  // spiffsManager.deleteFile("/renamed.txt");
+
+  // Test file I/O performance
+  // spiffsManager.testFileIO("/test.txt");
+
+  // Clean up the test file
+  // spiffsManager.deleteFile("/test.txt");
+
+  // Serial.println("All SPIFFS operations completed successfully!");
