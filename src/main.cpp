@@ -31,14 +31,14 @@
 
 #ifndef MQTT_HOST
 #define MQTT_HOST "your_mqtt_host"
-#endif  
+#endif
 
 #ifndef MQTT_PORT
 #define MQTT_PORT 1886 // as integer
 #endif
 
 #ifndef MQTT_USERNAME
-#define MQTT_USERNAME "mqtt_username" 
+#define MQTT_USERNAME "mqtt_username"
 #endif
 
 #ifndef MQTT_PASSWORD
@@ -86,7 +86,7 @@
  ******************************************************************************/
 SPIFFSManager spiffsManager(SPIFFS);
 WiFiClient wifiClient;
-WiFiMulti wifiMulti;           // Manages multiple WiFi networks
+WiFiMulti wifiMulti;                 // Manages multiple WiFi networks
 PubSubClient mqttClient(wifiClient); // MQTT client using WiFi
 
 // Create a canvas that will print scrollable text.
@@ -98,18 +98,21 @@ long mqttLastReconnectAttempt = 0;
 /******************************************************************************
  *                        FUNCTION PROTOTYPES
  ******************************************************************************/
-nlohmann::json loadWifiConfig(SPIFFSManager& spiffsManager);
+nlohmann::json loadWifiConfig(SPIFFSManager &spiffsManager);
 bool wifiConnect();
 boolean mqttReconnect();
-void mqttCallback(char* topic, byte* payload, unsigned int length);
+void mqttCallback(char *topic, byte *payload, unsigned int length);
 void displayWifiStatus();
+nlohmann::json updateWifiConfig(SPIFFSManager &spiffsManager, const char *ssid, const char *password);
 void displayBatteryStatus();
-void handleGithubEvent(const nlohmann::json& event);
-
+void displayMQTTStatus();
+void handleGithubEventJSON(const nlohmann::json &event);
+void handleGithubEvent(String message);
 /******************************************************************************
  *                                SETUP
  ******************************************************************************/
-void setup() {
+void setup()
+{
   Serial.begin(115200);
 
   auto cfg = M5.config();
@@ -118,11 +121,10 @@ void setup() {
   { /// I2S Custom configurations are available if you desire.
     auto spk_cfg = M5.Speaker.config();
 
-
     spk_cfg.buzzer = true;
     if (spk_cfg.use_dac || spk_cfg.buzzer)
     {
-    /// Increasing the sample_rate will improve the sound quality instead of increasing the CPU load.
+      /// Increasing the sample_rate will improve the sound quality instead of increasing the CPU load.
       spk_cfg.sample_rate = 192000; // default:64000 (64kHz)  e.g. 48000 , 50000 , 80000 , 96000 , 100000 , 128000 , 144000 , 192000 , 200000
     }
 
@@ -140,13 +142,15 @@ void setup() {
 
   // Set appropriate text size for the built-in display
   int textSize = M5.Display.height() / 68;
-  if (textSize == 0) {
+  if (textSize == 0)
+  {
     textSize = 1;
   }
   M5.Display.setTextSize(textSize);
 
   // Initialize SPIFFS
-  if (!SPIFFS.begin(FORMAT_SPIFFS_IF_FAILED)) {
+  if (!SPIFFS.begin(FORMAT_SPIFFS_IF_FAILED))
+  {
     Serial.println("SPIFFS Mount Failed");
     M5.Display.println("SPIFFS Mount Failed");
     return;
@@ -154,7 +158,8 @@ void setup() {
 
   // Load WiFi configuration from file and add networks to WiFiMulti
   nlohmann::json wifiJSON = loadWifiConfig(spiffsManager);
-  for (const auto& network : wifiJSON) {
+  for (const auto &network : wifiJSON)
+  {
     String ssid = network["ssid"].get<std::string>().c_str();
     String password = network["password"].get<std::string>().c_str();
     Serial.printf("Network SSID: %s\n", ssid.c_str());
@@ -176,95 +181,167 @@ void setup() {
   canvas.setTextSize((float)canvas.width() / 200);
   // Enable automatic vertical scrolling when printing text
   canvas.setTextScroll(true);
-
 }
 
 /******************************************************************************
  *                         HELPER FUNCTIONS
  ******************************************************************************/
 
+nlohmann::json updateWifiConfig(SPIFFSManager &spiffsManager, const char *ssid, const char *password)
+{
+  nlohmann::json wifiJSON;
+
+  // Check if the file exists.
+  if (!spiffsManager.fileExists("/wifi.json"))
+  {
+    M5.Display.println("wifi.json does not exist, creating new file.");
+    wifiJSON = nlohmann::json::array();
+  }
+  else
+  {
+    // Read the file content and try to parse it.
+    String wifis = spiffsManager.readFile("/wifi.json");
+    Serial.printf("Read wifi file content: '%s'\n", wifis.c_str());
+    try
+    {
+      wifiJSON = nlohmann::json::parse(wifis.c_str());
+      if (!wifiJSON.is_array())
+      {
+        M5.Display.println("Config is not an array; creating new array.");
+        wifiJSON = nlohmann::json::array();
+      }
+    }
+    catch (const nlohmann::json::exception &e)
+    {
+      Serial.printf("JSON parsing error: %s\n", e.what());
+      M5.Display.println("Error parsing wifi.json; creating new array.");
+      wifiJSON = nlohmann::json::array();
+    }
+  }
+
+  // Look for an existing credential with the same SSID.
+  bool found = false;
+  for (auto &cred : wifiJSON)
+  {
+    if (cred.contains("ssid") && cred["ssid"] == ssid)
+    {
+      // Update the password.
+      cred["password"] = password;
+      found = true;
+      break;
+    }
+  }
+
+  // If not found, add a new credential object.
+  if (!found)
+  {
+    nlohmann::json newCred = {{"ssid", ssid}, {"password", password}};
+    wifiJSON.push_back(newCred);
+  }
+
+  // Write back the updated JSON configuration to the file.
+  spiffsManager.writeFile("/wifi.json", wifiJSON.dump().c_str());
+  M5.Display.printf("Updated wifi config: %s\n", wifiJSON.dump().c_str());
+  Serial.printf("Updated wifi config written: %s\n", wifiJSON.dump().c_str());
+
+  return wifiJSON;
+}
+
 // Load WiFi configuration from SPIFFS (JSON file)
-nlohmann::json loadWifiConfig(SPIFFSManager& spiffsManager) {
+nlohmann::json loadWifiConfig(SPIFFSManager &spiffsManager)
+{
   Serial.begin(115200); // Ensure Serial is initialized
   nlohmann::json wifiJSON = nlohmann::json::array();
 
-  if (!spiffsManager.fileExists("/wifi.json")) {
-    M5.Display.println("wifi.json does not exist");
-    const char* defaultWifi = "[{\"ssid\":\"" WIFI_SSID "\",\"password\":\"" WIFI_PASS "\"}]";
-    spiffsManager.writeFile("/wifi.json", defaultWifi);
-    M5.Display.println("wifi.json created");
-    Serial.printf("Default wifi config written: %s\n", defaultWifi);
-    M5.Display.printf("Default wifi config written: %s\n", defaultWifi);
-  } else {
-    M5.Display.println("wifi.json exists");
-  }
+  // spiffsManager.deleteFile("/wifi.json");
+  wifiJSON = updateWifiConfig(spiffsManager, WIFI_SSID, WIFI_PASS);
 
   String wifis = spiffsManager.readFile("/wifi.json");
   Serial.printf("Read wifi file content: '%s'\n", wifis.c_str());
 
-  if (wifis.length() > 0) {
-    try {
+  if (wifis.length() > 0)
+  {
+    try
+    {
       wifiJSON = nlohmann::json::parse(wifis.c_str());
       M5.Display.printf("Loaded %d wifi networks\n", wifiJSON.size());
-      for (const auto& network : wifiJSON) {
+      for (const auto &network : wifiJSON)
+      {
         Serial.printf("Loaded Network SSID: %s\n", network["ssid"].get<std::string>().c_str());
       }
-    } catch (const nlohmann::json::exception& e) {
+    }
+    catch (const nlohmann::json::exception &e)
+    {
       Serial.printf("JSON parsing error: %s\n", e.what());
       M5.Display.println("Error parsing wifi config");
     }
-  } else {
+  }
+  else
+  {
     Serial.println("No wifi configuration read");
     M5.Display.println("No wifi configuration");
   }
   return wifiJSON;
 }
 
-void displayMQTTStatus() {
-  int indicatorSize = 8;  // size of the circle (in pixels)
-  int batteryIconWidth = 24;  // same as used in displayBatteryStatus()
+void displayMQTTStatus()
+{
+  int indicatorSize = 8;     // size of the circle (in pixels)
+  int batteryIconWidth = 24; // same as used in displayBatteryStatus()
   // Position it to the left of the battery indicator.
   // Battery indicator's x is: M5.Display.width() - batteryIconWidth - 25.
   // We offset further left by indicatorSize + 5 pixels.
   int x = M5.Display.width() - batteryIconWidth - 25 - indicatorSize - 10;
   int y = 3; // align vertically with the battery indicator
-  
+
   // Set color: GREEN if MQTT is connected, otherwise RED.
   uint16_t color = mqttClient.connected() ? BLUE : DARKGREY;
-  
+
   // Draw a filled circle indicator
-  M5.Display.fillCircle(x + indicatorSize/2, y + indicatorSize/2, indicatorSize/2, color);
+  M5.Display.fillCircle(x + indicatorSize / 2, y + indicatorSize / 2, indicatorSize / 2, color);
 }
 
 // Draw the WiFi signal strength icon in the top-right corner
-void displayWifiStatus() {
+void displayWifiStatus()
+{
   int iconSize = 20;
   int iconX = M5.Display.width() - iconSize; // Top-right corner x-coordinate
   int iconY = 0;                             // Top of the display
 
   M5.Display.fillRect(iconX, iconY, iconSize, iconSize, BLACK);
 
-  if (WiFi.status() == WL_CONNECTED) {
+  if (WiFi.status() == WL_CONNECTED)
+  {
     int rssi = WiFi.RSSI();
     int bars = 0;
-    if (rssi >= -50) bars = 4;
-    else if (rssi >= -60) bars = 3;
-    else if (rssi >= -70) bars = 2;
-    else bars = 1;
+    if (rssi >= -50)
+      bars = 4;
+    else if (rssi >= -60)
+      bars = 3;
+    else if (rssi >= -70)
+      bars = 2;
+    else
+      bars = 1;
 
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 4; i++)
+    {
       int barWidth = 2;
       int spacing = 2;
       int x = iconX + spacing + i * (barWidth + spacing);
       int baseY = iconY + iconSize - spacing - 6;
       int barHeight = 2 * (i + 1);
-      if (i < bars) {
+      if (i < bars)
+      {
         M5.Display.fillRect(x, baseY - barHeight, barWidth, barHeight, GREEN);
-      } else {
+      }
+      else
+      {
         M5.Display.drawRect(x, baseY - barHeight, barWidth, barHeight, WHITE);
       }
     }
-  } else {
+  }
+  else
+  {
     int padding = 4;
     int startX = iconX + padding;
     int startY = iconY + padding;
@@ -276,7 +353,8 @@ void displayWifiStatus() {
 }
 
 // Draw the battery status icon in the top-right area (to the left of WiFi)
-void displayBatteryStatus() {
+void displayBatteryStatus()
+{
   int batteryIconWidth = 24;
   int batteryIconHeight = 14;
   int batteryX = M5.Display.width() - batteryIconWidth - 25; // Positioned to left of WiFi icon
@@ -284,8 +362,8 @@ void displayBatteryStatus() {
 
   M5.Display.fillRect(batteryX, batteryY, batteryIconWidth, batteryIconHeight, BLACK);
 
-  std::int32_t batLevel = M5.Power.getBatteryLevel();   // Percentage 0-100
-  int16_t batVoltage = M5.Power.getBatteryVoltage();      // In millivolts
+  std::int32_t batLevel = M5.Power.getBatteryLevel(); // Percentage 0-100
+  int16_t batVoltage = M5.Power.getBatteryVoltage();  // In millivolts
 
   int bodyWidth = batteryIconWidth - 4;
   int bodyHeight = batteryIconHeight - 4;
@@ -296,30 +374,36 @@ void displayBatteryStatus() {
   M5.Display.fillRect(batteryX + 1, batteryY + 1, fillWidth, bodyHeight - 2, GREEN);
 
   bool charging = (batVoltage >= 4200);
-  if (charging) {
+  if (charging)
+  {
     int centerX = batteryX + bodyWidth / 2;
     int centerY = batteryY + bodyHeight / 2;
     M5.Display.drawLine(centerX - 4, batteryY + 2, centerX, centerY, DARKGREEN);
     M5.Display.drawLine(centerX, centerY, centerX - 2, batteryY + bodyHeight - 2, DARKGREEN);
     M5.Display.drawLine(centerX - 3, batteryY + 2, centerX, centerY, DARKGREEN);
-    M5.Display.drawLine(centerX +1, centerY, centerX - 2, batteryY + bodyHeight - 2, DARKGREEN);
+    M5.Display.drawLine(centerX + 1, centerY, centerX - 2, batteryY + bodyHeight - 2, DARKGREEN);
   }
 }
 
 // Connect to WiFi using the configured networks
-bool wifiConnect() {
+bool wifiConnect()
+{
   bool connected = false;
 
-  if (wifiMulti.run() == WL_CONNECTED) {
+  if (wifiMulti.run() == WL_CONNECTED)
+  {
     connected = true;
     mqttLastReconnectAttempt = 0;
-  } else {
+  }
+  else
+  {
     delay(1000);
   }
 
   static unsigned long lastDisplayUpdate = 0;
   unsigned long currentMillis = millis();
-  if (currentMillis - lastDisplayUpdate >= 10000) { // Every 10 seconds
+  if (currentMillis - lastDisplayUpdate >= 10000)
+  { // Every 10 seconds
     displayWifiStatus();
     displayBatteryStatus();
     displayMQTTStatus();
@@ -336,28 +420,32 @@ bool wifiConnect() {
 //   return mqttClient.connected();
 // }
 
-boolean mqttReconnect() {
-  if (mqttClient.connect(MQTT_CLIENT_ID, MQTT_USERNAME, MQTT_PASSWORD, MQTT_TOPIC, 1, false, "", false)) {
+boolean mqttReconnect()
+{
+  if (mqttClient.connect(MQTT_CLIENT_ID, MQTT_USERNAME, MQTT_PASSWORD, MQTT_TOPIC, 1, false, "", false))
+  {
     Serial.println("MQTT Connected");
     mqttClient.subscribe(MQTT_TOPIC);
-
-  } else {
+  }
+  else
+  {
     Serial.println("MQTT Connection failed");
   }
   return mqttClient.connected();
 }
 
 // Callback for incoming MQTT messages
-void mqttCallback(char* topic, byte* payload, unsigned int length) {
+void mqttCallback(char *topic, byte *payload, unsigned int length)
+{
   try
   {
     Serial.print("Message arrived [");
     Serial.print(topic);
     Serial.print("] ");
 
-    
     String message;
-    for (unsigned int i = 0; i < length; i++) {
+    for (unsigned int i = 0; i < length; i++)
+    {
       message += (char)payload[i];
     }
     Serial.println(message);
@@ -371,142 +459,77 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       {
 
         nlohmann::json j = nlohmann::json::parse(message);
-        if(j["msgType"] == "event" && j["msgGroup"] == "gh")
-        {          Serial.println("message supported");
+        if (j["msgType"] == "event" && j["msgGroup"] == "gh")
+        {
+          Serial.println("message supported");
 
-          handleGithubEvent(j);
-        }else{
+          handleGithubEventJSON(j);
+        }
+        else if (j["msgType"] == "config" && j["msgGroup"] == "wifi")
+        {
+          Serial.println("message supported");
+          // validate json object
+          if (j.contains("ssid") && j.contains("password"))
+          {
+            updateWifiConfig(spiffsManager, j["ssid"].get<std::string>().c_str(), j["password"].get<std::string>().c_str());
+            loadWifiConfig(spiffsManager);
+          }
+          else
+          {
+            Serial.println("Invalid wifi config message");
+          }
+        }
+        else
+        {
           Serial.println("message not supported");
         }
       }
-      catch(const std::exception& e)
+      catch (const std::exception &e)
       {
         std::cerr << e.what() << '\n';
       }
-      
-
-
     }
-    //e|gh|sssssss|bbbbbb|ps  slice this string by | and get each element
-    if(message.indexOf('|')){
+    // e|gh|sssssss|bbbbbb|ps  slice this string by | and get each element
+    if (message.indexOf('|'))
+    {
 
       std::string input = message.c_str();
       std::vector<std::string> slices;
       std::istringstream stream(input);
       std::string token;
-      
+
       // Split the string using '|' as the delimiter
-      while (std::getline(stream, token, '|')) {
+      while (std::getline(stream, token, '|'))
+      {
         slices.push_back(token);
       }
       String _type = slices[0].c_str();
       String _group = slices[1].c_str();
-      String _color = slices[2].c_str();
-      String _line = slices[3].c_str();
-      String _order = slices[4].c_str();
-      
-     
+
       Serial.printf("Type: %s\n", _type.c_str());
       Serial.printf("Group: %s\n", _group.c_str());
-      Serial.printf("Color: %s\n", _color.c_str());
-      Serial.printf("Line: %s\n", _line.c_str());
-      Serial.printf("Order: %s\n", _order.c_str());
 
-      if(_type == "e")
+      if (_type == "e")
       {
-        if(_color == "RED")
+        if (_group == "gh")
         {
-          canvas.setTextColor(RED);
-        }else if(_color == "GREEN")
-        {
-          canvas.setTextColor(GREEN);
-        }else if(_color == "YELLOW")
-        {
-          canvas.setTextColor(YELLOW);
-        }else if(_color == "CYAN")  
-        {
-          canvas.setTextColor(CYAN);
-        }else if(_color == "WHITE")
-        {
-          canvas.setTextColor(WHITE);
-        }else if(_color == "BLACK")
-        {
-          canvas.setTextColor(BLACK);
-        }else if(_color == "ORANGE")
-        {
-          canvas.setTextColor(ORANGE);
-        }else if(_color == "DARKGREY")
-        {
-          canvas.setTextColor(DARKGREY);  
-        }else if(_color == "PURPLE")
-        {
-          canvas.setTextColor(PURPLE); 
-        }
-        else{
-          canvas.setTextColor(WHITE);
-        }
-
-        if(_group == "gh")
-        {
-          if(_order == "1")
-          {
-            if(_color == "RED")
-            {
-              // play failure tone using M5.Speaker
-              // Failure tone sequence: descending tones
-              M5.Speaker.tone(800, 200);  // Tone at 800Hz for 200ms
-              delay(250);                // Short pause between tones
-              M5.Speaker.tone(600, 300);  // Tone at 600Hz for 300ms
-
-            }else if(_color == "GREEN")
-            {
-              // Success tone sequence: rising tones
-              M5.Speaker.tone(800, 100);   // 800Hz for 100ms
-              delay(150);
-              M5.Speaker.tone(1000, 100);  // 1000Hz for 100ms
-              delay(150);
-              M5.Speaker.tone(1200, 200);  // 1200Hz for 200ms
-
-
-            }else{
-              // Generic beep sequence: two short beeps
-              M5.Speaker.tone(500, 150);   // 500Hz for 150ms
-              delay(200);
-              M5.Speaker.tone(500, 150);   // 500Hz for 150ms
-
-            }
-          }
-          canvas.printf("%s\n", _line.c_str());
-          if(_order == "1")
-          {
-            int currentY = canvas.getCursorY();
-            // Draw a horizontal line from x=0 to canvas.width() at that Y position
-            // Optionally add an extra newline if you want spacing after the line
-            canvas.printf("---------------------------------\n");
-            // canvas.drawLine(0, currentY, canvas.width(), currentY+2, DARKGREY);
-          }
-          canvas.pushSprite(0, 25);
+          handleGithubEvent(message);
         }
       }
     }
 
-
-
-
-    if(message == "clear")
+    if (message == "clear")
     {
       canvas.clear();
     }
-
-
   }
-  catch(const std::exception& e)
+  catch (const std::exception &e)
   {
     Serial.println("Error");
     Serial.println(e.what());
     std::cerr << e.what() << '\n';
   }
-  
+
   // Serial.println(message);
   // M5.Display.println(message);
   // Additional processing (e.g., JSON parsing) can be added here
@@ -515,48 +538,162 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 /******************************************************************************
  *                         HANDLE GITHUB EVENT
  ******************************************************************************/
-void handleGithubEvent(const nlohmann::json& event) {
+void handleGithubEvent(String message)
+{
+  std::string input = message.c_str();
+  std::vector<std::string> slices;
+  std::istringstream stream(input);
+  std::string token;
+
+  // Split the string using '|' as the delimiter
+  while (std::getline(stream, token, '|'))
+  {
+    slices.push_back(token);
+  }
+  String _type = slices[0].c_str();
+  String _group = slices[1].c_str();
+
+  Serial.printf("Type: %s\n", _type.c_str());
+  Serial.printf("Group: %s\n", _group.c_str());
+  String _color = slices[2].c_str();
+  String _line = slices[3].c_str();
+  String _order = slices[4].c_str();
+
+  Serial.printf("Color: %s\n", _color.c_str());
+  Serial.printf("Line: %s\n", _line.c_str());
+  Serial.printf("Order: %s\n", _order.c_str());
+  if (_color == "RED")
+  {
+    canvas.setTextColor(RED);
+  }
+  else if (_color == "GREEN")
+  {
+    canvas.setTextColor(GREEN);
+  }
+  else if (_color == "YELLOW")
+  {
+    canvas.setTextColor(YELLOW);
+  }
+  else if (_color == "CYAN")
+  {
+    canvas.setTextColor(CYAN);
+  }
+  else if (_color == "WHITE")
+  {
+    canvas.setTextColor(WHITE);
+  }
+  else if (_color == "BLACK")
+  {
+    canvas.setTextColor(BLACK);
+  }
+  else if (_color == "ORANGE")
+  {
+    canvas.setTextColor(ORANGE);
+  }
+  else if (_color == "DARKGREY")
+  {
+    canvas.setTextColor(DARKGREY);
+  }
+  else if (_color == "PURPLE")
+  {
+    canvas.setTextColor(PURPLE);
+  }
+  else
+  {
+    canvas.setTextColor(WHITE);
+  }
+  if (_order == "1")
+  {
+    if (_color == "RED")
+    {
+      // play failure tone using M5.Speaker
+      // Failure tone sequence: descending tones
+      M5.Speaker.tone(8000, 400); // Tone at 800Hz for 200ms
+      delay(250);                // Short pause between tones
+      M5.Speaker.tone(6000, 600); // Tone at 600Hz for 300ms
+    }
+    else if (_color == "GREEN")
+    {
+      // Success tone sequence: rising tones
+      M5.Speaker.tone(8000, 100); // 800Hz for 100ms
+      delay(150);
+      M5.Speaker.tone(10000, 100); // 1000Hz for 100ms
+      delay(150);
+      M5.Speaker.tone(12000, 200); // 1200Hz for 200ms
+    }
+    else
+    {
+      // Generic beep sequence: two short beeps
+      M5.Speaker.tone(5000, 150); // 500Hz for 150ms
+      delay(200);
+      M5.Speaker.tone(5000, 150); // 500Hz for 150ms
+    }
+  }
+  canvas.printf("%s\n", _line.c_str());
+  if (_order == "1")
+  {
+    int currentY = canvas.getCursorY();
+    // Draw a horizontal line from x=0 to canvas.width() at that Y position
+    // Optionally add an extra newline if you want spacing after the line
+    canvas.printf("---------------------------------\n");
+    // canvas.drawLine(0, currentY, canvas.width(), currentY+2, DARKGREY);
+  }
+  canvas.pushSprite(0, 25);
+}
+void handleGithubEventJSON(const nlohmann::json &event)
+{
   // Implement your handling logic here
-  if (event["type"].is_string()) {
+  if (event["type"].is_string())
+  {
     std::string eventType = event["type"].get<std::string>();
-    if (eventType == "workflow_run") {
+    if (eventType == "workflow_run")
+    {
       if (event["status"].is_string())
       {
-        if (event["status"] == "queued") {
+        if (event["status"] == "queued")
+        {
           canvas.setTextColor(YELLOW);
-        } else if (event["status"] == "in_progress")
+        }
+        else if (event["status"] == "in_progress")
         {
           canvas.setTextColor(ORANGE);
-        } else if (event["status"] == "completed")
+        }
+        else if (event["status"] == "completed")
         {
           if (event["conclusion"].is_string())
           {
-            if (event["conclusion"] == "success") {
+            if (event["conclusion"] == "success")
+            {
               canvas.setTextColor(GREEN);
-            } else if (event["conclusion"] == "cancelled")
+            }
+            else if (event["conclusion"] == "cancelled")
             {
               canvas.setTextColor(DARKGREY);
-            }else{
+            }
+            else
+            {
               canvas.setTextColor(RED);
             }
           }
         }
       }
-      
-    } else if (eventType == "push") {
+    }
+    else if (eventType == "push")
+    {
       canvas.setTextColor(CYAN);
-    } else {
+    }
+    else
+    {
       canvas.setTextColor(WHITE);
     }
   }
 
- 
-  if (event["lines"].is_array()) {
+  if (event["lines"].is_array())
+  {
     for (size_t i = 0; i < event["lines"].size(); i++)
     {
       canvas.printf("%s\n", event["lines"][i].get<std::string>().c_str());
     }
-    
   }
   canvas.setTextColor(WHITE);
 
@@ -569,18 +706,29 @@ void handleGithubEvent(const nlohmann::json& event) {
 /******************************************************************************
  *                                MAIN LOOP
  ******************************************************************************/
-void loop() {
+void loop()
+{
   // WiFi & MQTT handling
-  if (wifiConnect()) {
-    if (!mqttClient.connected()) {
+  if (wifiConnect())
+  {
+    if (!mqttClient.connected())
+    {
       long now = millis();
-      if (now - mqttLastReconnectAttempt > 5000) {
+      if (now - mqttLastReconnectAttempt > 5000)
+      {
         mqttLastReconnectAttempt = now;
-        if (mqttReconnect()) {
+        if (mqttReconnect())
+        {
           mqttLastReconnectAttempt = 0;
+        }else{
+          Serial.println("MQTT Connection failed");
+          sleep(3000);
         }
+
       }
-    } else {
+    }
+    else
+    {
       mqttClient.loop();
     }
   }
