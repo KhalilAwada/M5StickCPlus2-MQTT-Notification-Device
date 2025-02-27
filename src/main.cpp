@@ -9,7 +9,7 @@
 #include <M5UnitLCD.h>
 #include <M5Unified.h>
 #include <PubSubClient.h>
-// Removed <nlohmann/json.hpp>, <iostream>, and <sstream>
+// Removed unused headers
 
 /******************************************************************************
  *                           CONFIGURATION MACROS
@@ -87,35 +87,45 @@ long mqttLastReconnectAttempt = 0;
 /******************************************************************************
  *                        FUNCTION PROTOTYPES
  ******************************************************************************/
-DynamicJsonDocument loadWifiConfig(SPIFFSManager &spiffsManager);
+StaticJsonDocument<1024> loadWifiConfig(SPIFFSManager &spiffsManager);
 bool wifiConnect();
 boolean mqttReconnect();
 void mqttCallback(char *topic, byte *payload, unsigned int length);
 void displayWifiStatus();
-DynamicJsonDocument updateWifiConfig(SPIFFSManager &spiffsManager, const char *ssid, const char *password);
+StaticJsonDocument<1024> updateWifiConfig(SPIFFSManager &spiffsManager, const char *ssid, const char *password);
 void displayBatteryStatus();
 void displayMQTTStatus();
-void handleGithubEventJSON(const DynamicJsonDocument &event);
+void handleGithubEventJSON(const StaticJsonDocument<2048> &event);
 void handleGithubEvent(String message);
+
+// In your main loop, check for idle time and dim the screen:
+
+// Global variable to track last brightness change time
+unsigned long lastBrightnessChange = 0;
+const unsigned long brightnessTimeout = 10000; // 10 seconds at full brightness
+const unsigned long fadeDuration = 10000;       // 10 sec fade duration
+const uint8_t fullBrightness = 200;
+const uint8_t dimBrightness = 0;
 
 /******************************************************************************
  *                                SETUP
  ******************************************************************************/
-void setup() {
+void setup()
+{
   Serial.begin(115200);
-
   auto cfg = M5.config();
   M5.begin(cfg);
-  { // Configure speaker (using I2S custom settings)
+  { // Configure speaker with custom I2S settings
     auto spk_cfg = M5.Speaker.config();
     spk_cfg.buzzer = true;
-    if (spk_cfg.use_dac || spk_cfg.buzzer) {
-      spk_cfg.sample_rate = 192000; // Increase sample_rate for improved quality
+    if (spk_cfg.use_dac || spk_cfg.buzzer)
+    {
+      spk_cfg.sample_rate = 192000;
     }
     M5.Speaker.config(spk_cfg);
   }
   M5.Power.begin();
-  M5.Speaker.begin();
+  // M5.Speaker.begin();
 
   delay(3000);
   Serial.println("Started");
@@ -123,27 +133,32 @@ void setup() {
   M5.setPrimaryDisplayType({m5::board_t::board_M5UnitLCD});
   M5.Display.setRotation(3);
   int textSize = M5.Display.height() / 68;
-  if (textSize == 0) textSize = 1;
+  if (textSize == 0)
+    textSize = 1;
   M5.Display.setTextSize(textSize);
+  M5.Display.setColorDepth(8);
 
   /**************************************************************************
    *                Initialize the Scrollable Text Canvas
    **************************************************************************/
-  canvas.setColorDepth(8); // Use 2-bit color depth to reduce memory usage
+  // If possible, lower the color depth (e.g., to 4 or 2 bits) to reduce RAM
+  canvas.setColorDepth(8);
   canvas.createSprite(M5.Display.width(), M5.Display.height() - 25);
   canvas.setTextSize((float)canvas.width() / 200);
   canvas.setTextScroll(true);
 
-  if (!SPIFFS.begin(FORMAT_SPIFFS_IF_FAILED)) {
+  if (!SPIFFS.begin(FORMAT_SPIFFS_IF_FAILED))
+  {
     Serial.println("SPIFFS Mount Failed");
     canvas.println("SPIFFS Mount Failed");
     return;
   }
 
-  DynamicJsonDocument wifiJSON = loadWifiConfig(spiffsManager);
-  for (JsonObject network : wifiJSON.as<JsonArray>()) {
-    const char* ssid = network["ssid"];
-    const char* password = network["password"];
+  StaticJsonDocument<1024> wifiJSON = loadWifiConfig(spiffsManager);
+  for (JsonObject network : wifiJSON.as<JsonArray>())
+  {
+    const char *ssid = network["ssid"];
+    const char *password = network["password"];
     Serial.printf("Network SSID: %s\n", ssid);
     wifiMulti.addAP(ssid, password);
   }
@@ -155,40 +170,43 @@ void setup() {
 /******************************************************************************
  *                         HELPER FUNCTIONS
  ******************************************************************************/
-DynamicJsonDocument updateWifiConfig(SPIFFSManager &spiffsManager, const char *ssid, const char *password) {
-  // Allocate 1024 bytes for the WiFi configuration document
-  DynamicJsonDocument wifiDoc(1024);
-
-  if (!spiffsManager.fileExists("/wifi.json")) {
+StaticJsonDocument<1024> updateWifiConfig(SPIFFSManager &spiffsManager, const char *ssid, const char *password)
+{
+  StaticJsonDocument<1024> wifiDoc;
+  if (!spiffsManager.fileExists("/wifi.json"))
+  {
     canvas.println("wifi.json does not exist, creating new file.");
-    // Create an empty JSON array
-    wifiDoc.to<JsonArray>();
-  } else {
+    wifiDoc.to<JsonArray>(); // create an empty array
+  }
+  else
+  {
     String wifis = spiffsManager.readFile("/wifi.json");
     Serial.printf("Read wifi file content: '%s'\n", wifis.c_str());
     DeserializationError error = deserializeJson(wifiDoc, wifis);
-    if (error || !wifiDoc.is<JsonArray>()) {
+    if (error || !wifiDoc.is<JsonArray>())
+    {
       canvas.println("Error parsing wifi.json; creating new array.");
       wifiDoc.clear();
       wifiDoc.to<JsonArray>();
     }
   }
   JsonArray array = wifiDoc.as<JsonArray>();
-
   bool found = false;
-  for (JsonObject cred : array) {
-    if (cred["ssid"] && strcmp(cred["ssid"], ssid) == 0) {
+  for (JsonObject cred : array)
+  {
+    if (cred["ssid"] && strcmp(cred["ssid"], ssid) == 0)
+    {
       cred["password"] = password;
       found = true;
       break;
     }
   }
-  if (!found) {
+  if (!found)
+  {
     JsonObject newCred = array.createNestedObject();
     newCred["ssid"] = ssid;
     newCred["password"] = password;
   }
-
   String output;
   serializeJson(wifiDoc, output);
   spiffsManager.writeFile("/wifi.json", output.c_str());
@@ -198,26 +216,32 @@ DynamicJsonDocument updateWifiConfig(SPIFFSManager &spiffsManager, const char *s
   return wifiDoc;
 }
 
-DynamicJsonDocument loadWifiConfig(SPIFFSManager &spiffsManager) {
-  DynamicJsonDocument wifiDoc(1024);
+StaticJsonDocument<1024> loadWifiConfig(SPIFFSManager &spiffsManager)
+{
+  StaticJsonDocument<1024> wifiDoc;
   wifiDoc = updateWifiConfig(spiffsManager, WIFI_SSID, WIFI_PASS);
   String wifis = spiffsManager.readFile("/wifi.json");
   Serial.printf("Read wifi file content: '%s'\n", wifis.c_str());
   DeserializationError error = deserializeJson(wifiDoc, wifis);
-  if (error) {
+  if (error)
+  {
     Serial.printf("JSON parsing error: %s\n", error.c_str());
     canvas.println("Error parsing wifi config");
-  } else {
+  }
+  else
+  {
     canvas.printf("Loaded %d wifi networks\n", wifiDoc.as<JsonArray>().size());
-    for (JsonObject network : wifiDoc.as<JsonArray>()) {
-      Serial.printf("Loaded Network SSID: %s\n", network["ssid"].as<const char*>());
+    for (JsonObject network : wifiDoc.as<JsonArray>())
+    {
+      Serial.printf("Loaded Network SSID: %s\n", network["ssid"].as<const char *>());
     }
   }
   canvas.pushSprite(0, 25);
   return wifiDoc;
 }
 
-void displayMQTTStatus() {
+void displayMQTTStatus()
+{
   int indicatorSize = 8;
   int batteryIconWidth = 24;
   int x = M5.Display.width() - batteryIconWidth - 25 - indicatorSize - 10;
@@ -226,15 +250,20 @@ void displayMQTTStatus() {
   M5.Display.fillCircle(x + indicatorSize / 2, y + indicatorSize / 2, indicatorSize / 2, color);
 }
 
-void displayWifiStatus() {
+void displayWifiStatus()
+{
   int iconSize = 20;
   int iconX = M5.Display.width() - iconSize;
   int iconY = 0;
   M5.Display.fillRect(iconX, iconY, iconSize, iconSize, BLACK);
-  if (WiFi.status() == WL_CONNECTED) {
+  if (WiFi.status() == WL_CONNECTED)
+  {
     int rssi = WiFi.RSSI();
-    int bars = (rssi >= -50) ? 4 : (rssi >= -60) ? 3 : (rssi >= -70) ? 2 : 1;
-    for (int i = 0; i < 4; i++) {
+    int bars = (rssi >= -50) ? 4 : (rssi >= -60) ? 3
+                               : (rssi >= -70)   ? 2
+                                                 : 1;
+    for (int i = 0; i < 4; i++)
+    {
       int barWidth = 2, spacing = 2;
       int x = iconX + spacing + i * (barWidth + spacing);
       int baseY = iconY + iconSize - spacing - 6;
@@ -244,7 +273,9 @@ void displayWifiStatus() {
       else
         M5.Display.drawRect(x, baseY - barHeight, barWidth, barHeight, WHITE);
     }
-  } else {
+  }
+  else
+  {
     int padding = 4;
     int startX = iconX + padding, startY = iconY + padding;
     int endX = iconX + iconSize - padding, endY = iconY + iconSize - padding;
@@ -253,7 +284,8 @@ void displayWifiStatus() {
   }
 }
 
-void displayBatteryStatus() {
+void displayBatteryStatus()
+{
   int batteryIconWidth = 24, batteryIconHeight = 14;
   int batteryX = M5.Display.width() - batteryIconWidth - 25, batteryY = 3;
   M5.Display.fillRect(batteryX, batteryY, batteryIconWidth, batteryIconHeight, BLACK);
@@ -264,7 +296,8 @@ void displayBatteryStatus() {
   M5.Display.fillRect(batteryX + bodyWidth, batteryY + (bodyHeight / 2) - 2, 3, 4, DARKGREY);
   int fillWidth = ((bodyWidth - 2) * batLevel) / 100;
   M5.Display.fillRect(batteryX + 1, batteryY + 1, fillWidth, bodyHeight - 2, GREEN);
-  if (batVoltage >= 4200) {
+  if (batVoltage >= 4200)
+  {
     int centerX = batteryX + bodyWidth / 2, centerY = batteryY + bodyHeight / 2;
     M5.Display.drawLine(centerX - 4, batteryY + 2, centerX, centerY, DARKGREEN);
     M5.Display.drawLine(centerX, centerY, centerX - 2, batteryY + bodyHeight - 2, DARKGREEN);
@@ -273,7 +306,8 @@ void displayBatteryStatus() {
   }
 }
 
-bool wifiConnect() {
+bool wifiConnect()
+{
   bool connected = (wifiMulti.run() == WL_CONNECTED);
   if (connected)
     mqttLastReconnectAttempt = 0;
@@ -281,7 +315,8 @@ bool wifiConnect() {
     delay(1000);
   static unsigned long lastDisplayUpdate = 0;
   unsigned long currentMillis = millis();
-  if (currentMillis - lastDisplayUpdate >= 10000) {
+  if (currentMillis - lastDisplayUpdate >= 10000)
+  {
     displayWifiStatus();
     displayBatteryStatus();
     displayMQTTStatus();
@@ -290,11 +325,15 @@ bool wifiConnect() {
   return connected;
 }
 
-boolean mqttReconnect() {
-  if (mqttClient.connect(MQTT_CLIENT_ID, MQTT_USERNAME, MQTT_PASSWORD, MQTT_TOPIC, 1, false, "", false)) {
+boolean mqttReconnect()
+{
+  if (mqttClient.connect(MQTT_CLIENT_ID, MQTT_USERNAME, MQTT_PASSWORD, MQTT_TOPIC, 1, false, "", false))
+  {
     Serial.println("MQTT Connected");
     mqttClient.subscribe(MQTT_TOPIC);
-  } else {
+  }
+  else
+  {
     Serial.println("MQTT Connection failed");
   }
   return mqttClient.connected();
@@ -303,78 +342,99 @@ boolean mqttReconnect() {
 /******************************************************************************
  *                          MQTT CALLBACK
  ******************************************************************************/
-void mqttCallback(char *topic, byte *payload, unsigned int length) {
+void mqttCallback(char *topic, byte *payload, unsigned int length)
+{
   String message;
-  for (unsigned int i = 0; i < length; i++) {
+  for (unsigned int i = 0; i < length; i++)
+  {
     message += (char)payload[i];
   }
   Serial.println(message);
 
   // If the message is JSON
-  if (message.startsWith("{") && message.endsWith("}")) {
-    DynamicJsonDocument doc(2048);
+  if (message.startsWith("{") && message.endsWith("}"))
+  {
+    StaticJsonDocument<2048> doc;
     DeserializationError error = deserializeJson(doc, message);
-    if (error) {
+    if (error)
+    {
       Serial.print("deserializeJson() failed: ");
       Serial.println(error.c_str());
-    } else {
-      const char* msgType = doc["msgType"];
-      const char* msgGroup = doc["msgGroup"];
-      if (strcmp(msgType, "event") == 0 && strcmp(msgGroup, "gh") == 0) {
+    }
+    else
+    {
+      const char *msgType = doc["msgType"];
+      const char *msgGroup = doc["msgGroup"];
+      if (strcmp(msgType, "event") == 0 && strcmp(msgGroup, "gh") == 0)
+      {
         Serial.println("message supported");
         handleGithubEventJSON(doc);
       }
-      else if (strcmp(msgType, "config") == 0 && strcmp(msgGroup, "wifi") == 0) {
+      else if (strcmp(msgType, "config") == 0 && strcmp(msgGroup, "wifi") == 0)
+      {
         Serial.println("message supported");
-        if (doc.containsKey("ssid") && doc.containsKey("password")) {
+        if (doc.containsKey("ssid") && doc.containsKey("password"))
+        {
           updateWifiConfig(spiffsManager, doc["ssid"], doc["password"]);
           loadWifiConfig(spiffsManager);
-        } else {
+        }
+        else
+        {
           Serial.println("Invalid wifi config message");
         }
-      } else {
+      }
+      else
+      {
         Serial.println("message not supported");
       }
     }
   }
   // If message contains '|' use strtok() to split tokens
-  else if (message.indexOf('|') != -1) {
+  else if (message.indexOf('|') != -1)
+  {
     char buf[message.length() + 1];
     message.toCharArray(buf, sizeof(buf));
     const int maxTokens = 5;
     String tokens[maxTokens];
     int index = 0;
-    char* token = strtok(buf, "|");
-    while (token != NULL && index < maxTokens) {
+    char *token = strtok(buf, "|");
+    while (token != NULL && index < maxTokens)
+    {
       tokens[index++] = String(token);
       token = strtok(NULL, "|");
     }
-    if (index == maxTokens && tokens[0] == "e" && tokens[1] == "gh") {
+    if (index == maxTokens && tokens[0] == "e" && tokens[1] == "gh")
+    {
       handleGithubEvent(message);
     }
   }
-  if (message == "clear") {
+  if (message == "clear")
+  {
     canvas.clear();
   }
+
+  M5.Display.setBrightness(fullBrightness);
+  lastBrightnessChange = millis(); // reset timeout timer
 }
 
 /******************************************************************************
- *                     HANDLE GITHUB EVENT (String)
+ *              HANDLE GITHUB EVENT (String)
  ******************************************************************************/
-void handleGithubEvent(String message) {
+void handleGithubEvent(String message)
+{
   char buf[message.length() + 1];
   message.toCharArray(buf, sizeof(buf));
   const int maxTokens = 5;
   String tokens[maxTokens];
   int index = 0;
-  char* token = strtok(buf, "|");
-  while (token != NULL && index < maxTokens) {
+  char *token = strtok(buf, "|");
+  while (token != NULL && index < maxTokens)
+  {
     tokens[index++] = String(token);
     token = strtok(NULL, "|");
   }
-  if (index < maxTokens) return;
-  String _type = tokens[0];
-  String _group = tokens[1];
+  if (index < maxTokens)
+    return;
   String _color = tokens[2];
   String _line = tokens[3];
   String _order = tokens[4];
@@ -403,49 +463,64 @@ void handleGithubEvent(String message) {
   else
     canvas.setTextColor(WHITE);
 
-  if (_order == "1") {
-    if (_color == "RED") {
+  // Note: Blocking delays in the tone sequences can cause instability.
+  // Consider using non-blocking timing if delays prove problematic.
+  if (_order == "1")
+  {
+
+    M5.Speaker.begin();
+    if (_color == "RED")
+    {
       M5.Speaker.tone(8000, 400);
       delay(250);
       M5.Speaker.tone(6000, 600);
     }
-    else if (_color == "GREEN") {
+    else if (_color == "GREEN")
+    {
       M5.Speaker.tone(8000, 100);
       delay(150);
       M5.Speaker.tone(10000, 100);
       delay(150);
       M5.Speaker.tone(12000, 200);
     }
-    else {
+    else
+    {
       M5.Speaker.tone(5000, 150);
       delay(200);
       M5.Speaker.tone(5000, 150);
     }
+    M5.Speaker.end();
   }
   canvas.printf("%s\n", _line.c_str());
-  if (_order == "1") {
-    int currentY = canvas.getCursorY();
+  if (_order == "1")
+  {
     canvas.printf("---------------------------------\n");
   }
   canvas.pushSprite(0, 25);
 }
 
 /******************************************************************************
- *                 HANDLE GITHUB EVENT (JSON)
+ *              HANDLE GITHUB EVENT (JSON)
  ******************************************************************************/
-void handleGithubEventJSON(const DynamicJsonDocument &event) {
-  const char* eventType = event["type"];
-  if (eventType) {
-    if (strcmp(eventType, "workflow_run") == 0) {
-      const char* status = event["status"];
-      if (status) {
+void handleGithubEventJSON(const StaticJsonDocument<2048> &event)
+{
+  const char *eventType = event["type"];
+  if (eventType)
+  {
+    if (strcmp(eventType, "workflow_run") == 0)
+    {
+      const char *status = event["status"];
+      if (status)
+      {
         if (strcmp(status, "queued") == 0)
           canvas.setTextColor(YELLOW);
         else if (strcmp(status, "in_progress") == 0)
           canvas.setTextColor(ORANGE);
-        else if (strcmp(status, "completed") == 0) {
-          const char* conclusion = event["conclusion"];
-          if (conclusion) {
+        else if (strcmp(status, "completed") == 0)
+        {
+          const char *conclusion = event["conclusion"];
+          if (conclusion)
+          {
             if (strcmp(conclusion, "success") == 0)
               canvas.setTextColor(GREEN);
             else if (strcmp(conclusion, "cancelled") == 0)
@@ -472,22 +547,51 @@ void handleGithubEventJSON(const DynamicJsonDocument &event) {
 /******************************************************************************
  *                                MAIN LOOP
  ******************************************************************************/
-void loop() {
-  if (wifiConnect()) {
-    if (!mqttClient.connected()) {
+void loop()
+{
+  M5.update();
+  // Check if BtnB was pressed to increase brightness
+    if (M5.BtnA.wasPressed()) {
+      M5.Display.setBrightness(fullBrightness);
+      lastBrightnessChange = millis(); // reset timeout timer
+    }
+    
+  unsigned long elapsed = millis() - lastBrightnessChange;
+  
+  // If the full-brightness period has passed, begin fading gradually
+  if (elapsed > brightnessTimeout) {
+    unsigned long fadeTime = elapsed - brightnessTimeout;
+    if (fadeTime < fadeDuration) {
+      // Compute new brightness linearly between fullBrightness and dimBrightness
+      uint8_t newBrightness = fullBrightness - ((fullBrightness - dimBrightness) * fadeTime) / fadeDuration;
+      M5.Display.setBrightness(newBrightness);
+    } else {
+      // Fade completed: set brightness to dim value
+      M5.Display.setBrightness(dimBrightness);
+    }
+  }
+  if (wifiConnect())
+  {
+    if (!mqttClient.connected())
+    {
       long now = millis();
-      if (now - mqttLastReconnectAttempt > 5000) {
+      if (now - mqttLastReconnectAttempt > 5000)
+      {
         mqttLastReconnectAttempt = now;
         if (mqttReconnect())
           mqttLastReconnectAttempt = 0;
-        else {
+        else
+        {
           Serial.println("MQTT Connection failed");
-          sleep(3000);
+          delay(3000); // Use delay() instead of sleep()
         }
       }
     }
-    else {
+    else
+    {
       mqttClient.loop();
     }
   }
+ 
+  
 }
