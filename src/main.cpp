@@ -83,7 +83,7 @@ WiFiMulti wifiMulti;
 PubSubClient mqttClient(wifiClient);
 M5Canvas canvas(&M5.Display);
 long mqttLastReconnectAttempt = 0;
-
+bool isCharging = false;
 /******************************************************************************
  *                        FUNCTION PROTOTYPES
  ******************************************************************************/
@@ -290,13 +290,13 @@ void displayBatteryStatus()
   int batteryX = M5.Display.width() - batteryIconWidth - 25, batteryY = 3;
   M5.Display.fillRect(batteryX, batteryY, batteryIconWidth, batteryIconHeight, BLACK);
   std::int32_t batLevel = M5.Power.getBatteryLevel();
-  int16_t batVoltage = M5.Power.getBatteryVoltage();
+  // int16_t batVoltage = M5.Power.getBatteryVoltage();
   int bodyWidth = batteryIconWidth - 4, bodyHeight = batteryIconHeight - 4;
   M5.Display.drawRect(batteryX, batteryY, bodyWidth, bodyHeight, DARKGREY);
   M5.Display.fillRect(batteryX + bodyWidth, batteryY + (bodyHeight / 2) - 2, 3, 4, DARKGREY);
   int fillWidth = ((bodyWidth - 2) * batLevel) / 100;
   M5.Display.fillRect(batteryX + 1, batteryY + 1, fillWidth, bodyHeight - 2, GREEN);
-  if (batVoltage >= 4200)
+  if (isCharging)
   {
     int centerX = batteryX + bodyWidth / 2, centerY = batteryY + bodyHeight / 2;
     M5.Display.drawLine(centerX - 4, batteryY + 2, centerX, centerY, DARKGREEN);
@@ -559,15 +559,19 @@ void loop()
   unsigned long elapsed = millis() - lastBrightnessChange;
   
   // If the full-brightness period has passed, begin fading gradually
-  if (elapsed > brightnessTimeout) {
-    unsigned long fadeTime = elapsed - brightnessTimeout;
-    if (fadeTime < fadeDuration) {
-      // Compute new brightness linearly between fullBrightness and dimBrightness
-      uint8_t newBrightness = fullBrightness - ((fullBrightness - dimBrightness) * fadeTime) / fadeDuration;
-      M5.Display.setBrightness(newBrightness);
-    } else {
-      // Fade completed: set brightness to dim value
-      M5.Display.setBrightness(dimBrightness);
+  int16_t batVoltage = M5.Power.getBatteryVoltage();
+  isCharging=(batVoltage >= 4200)?true:false;
+  if(!isCharging){
+    if (elapsed > brightnessTimeout) {
+      unsigned long fadeTime = elapsed - brightnessTimeout;
+      if (fadeTime < fadeDuration) {
+        // Compute new brightness linearly between fullBrightness and dimBrightness
+        uint8_t newBrightness = fullBrightness - ((fullBrightness - dimBrightness) * fadeTime) / fadeDuration;
+        M5.Display.setBrightness(newBrightness);
+      } else {
+        // Fade completed: set brightness to dim value
+        M5.Display.setBrightness(dimBrightness);
+      }
     }
   }
   if (wifiConnect())
