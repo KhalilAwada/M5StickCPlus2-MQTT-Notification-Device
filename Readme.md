@@ -52,3 +52,16 @@ A low-power notification device built on the M5StickC platform that receives MQT
    ```bash
    git clone https://github.com/yourusername/m5stickc-mqtt-notification.git
    cd m5stickc-mqtt-notification
+
+
+
+
+
+   {
+  "msgType":"config",
+  "msgGroup":"wifi",
+  "ssid":"Tenda_62C938",
+  "password":"123@456#789"
+}
+
+{"msgType":"config","msgGroup":"wifi","ssid":"GL-AXT-Applink2","password":"3D4RZAH82S3D4RZAH82S"}

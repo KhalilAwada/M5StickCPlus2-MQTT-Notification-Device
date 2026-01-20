@@ -78,12 +78,16 @@
  *                    GLOBAL OBJECTS & VARIABLES
  ******************************************************************************/
 SPIFFSManager spiffsManager(SPIFFS);
+
 WiFiClient wifiClient;
 WiFiMulti wifiMulti;
 PubSubClient mqttClient(wifiClient);
 M5Canvas canvas(&M5.Display);
 long mqttLastReconnectAttempt = 0;
 bool isCharging = false;
+bool enableDimming = true; // Enable dimming when on battery
+const uint32_t connectTimeoutMs = 10000;
+
 /******************************************************************************
  *                        FUNCTION PROTOTYPES
  ******************************************************************************/
@@ -97,14 +101,14 @@ void displayBatteryStatus();
 void displayMQTTStatus();
 void handleGithubEventJSON(const StaticJsonDocument<2048> &event);
 void handleGithubEvent(String message);
-
+void scanWifiNetworks();
 // In your main loop, check for idle time and dim the screen:
 
 // Global variable to track last brightness change time
 unsigned long lastBrightnessChange = 0;
 const unsigned long brightnessTimeout = 10000; // 10 seconds at full brightness
 const unsigned long fadeDuration = 10000;       // 10 sec fade duration
-const uint8_t fullBrightness = 200;
+const uint8_t fullBrightness = 150; // Reduced from 200 to save battery
 const uint8_t dimBrightness = 0;
 
 /******************************************************************************
@@ -154,18 +158,31 @@ void setup()
     return;
   }
 
+  WiFi.mode(WIFI_STA);
+
+
   StaticJsonDocument<1024> wifiJSON = loadWifiConfig(spiffsManager);
   for (JsonObject network : wifiJSON.as<JsonArray>())
   {
     const char *ssid = network["ssid"];
     const char *password = network["password"];
-    Serial.printf("Network SSID: %s\n", ssid);
+    Serial.printf("Adding Network SSID: >%s< >%s<\n", ssid,password);
     wifiMulti.addAP(ssid, password);
   }
 
   mqttClient.setServer(MQTT_HOST, 1883);
   mqttClient.setCallback(mqttCallback);
+
+  // Connect to Wi-Fi using wifiMulti (connects to the SSID with strongest connection)
+  Serial.println("Connecting Wifi...");
+  if(wifiMulti.run() == WL_CONNECTED) {
+    Serial.println("");
+    Serial.println("WiFi connected");
+    Serial.println("IP address: ");
+    Serial.println(WiFi.localIP());
+  }
 }
+
 
 /******************************************************************************
  *                         HELPER FUNCTIONS
@@ -210,9 +227,7 @@ StaticJsonDocument<1024> updateWifiConfig(SPIFFSManager &spiffsManager, const ch
   String output;
   serializeJson(wifiDoc, output);
   spiffsManager.writeFile("/wifi.json", output.c_str());
-  canvas.printf("Updated wifi config: %s\n", output.c_str());
   Serial.printf("Updated wifi config written: %s\n", output.c_str());
-  canvas.pushSprite(0, 25);
   return wifiDoc;
 }
 
@@ -230,11 +245,11 @@ StaticJsonDocument<1024> loadWifiConfig(SPIFFSManager &spiffsManager)
   }
   else
   {
-    canvas.printf("Loaded %d wifi networks\n", wifiDoc.as<JsonArray>().size());
     for (JsonObject network : wifiDoc.as<JsonArray>())
     {
       Serial.printf("Loaded Network SSID: %s\n", network["ssid"].as<const char *>());
     }
+    canvas.printf("Loaded %d wifi networks\n", wifiDoc.as<JsonArray>().size());
   }
   canvas.pushSprite(0, 25);
   return wifiDoc;
@@ -308,14 +323,14 @@ void displayBatteryStatus()
 
 bool wifiConnect()
 {
-  bool connected = (wifiMulti.run() == WL_CONNECTED);
+  bool connected = (wifiMulti.run(connectTimeoutMs) == WL_CONNECTED);
   if (connected)
     mqttLastReconnectAttempt = 0;
   else
-    delay(1000);
+    delay(2000);
   static unsigned long lastDisplayUpdate = 0;
   unsigned long currentMillis = millis();
-  if (currentMillis - lastDisplayUpdate >= 10000)
+  if (currentMillis - lastDisplayUpdate >= 30000) // Increased from 10000 to 30000 (30 seconds)
   {
     displayWifiStatus();
     displayBatteryStatus();
@@ -323,6 +338,32 @@ bool wifiConnect()
     lastDisplayUpdate = currentMillis;
   }
   return connected;
+}
+
+void scanWifiNetworks() {
+  // free memory used by scan
+  WiFi.scanDelete();
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();      // ensure we’re not already connected
+  delay(100);
+
+  Serial.println("Scanning for Wi-Fi networks...");
+  int n = WiFi.scanNetworks();
+  if (n == 0) {
+    Serial.println("  No networks found");
+  } else {
+    for (int i = 0; i < n; i++) {
+      // SSID, signal strength and open/protected
+      Serial.printf("  %2d: %s  (%d dBm)  %s\n",
+                    i + 1,
+                    WiFi.SSID(i).c_str(),
+                    WiFi.RSSI(i),
+                    (WiFi.encryptionType(i) == WIFI_AUTH_OPEN)
+                      ? "open"
+                      : "secured");
+      delay(10);
+    }
+  }
 }
 
 boolean mqttReconnect()
@@ -344,15 +385,14 @@ boolean mqttReconnect()
  ******************************************************************************/
 void mqttCallback(char *topic, byte *payload, unsigned int length)
 {
-  String message;
-  for (unsigned int i = 0; i < length; i++)
-  {
-    message += (char)payload[i];
-  }
+  // Null-terminate payload in place for efficiency (saves String allocation)
+  char message[length + 1];
+  memcpy(message, payload, length);
+  message[length] = '\0';
   Serial.println(message);
 
   // If the message is JSON
-  if (message.startsWith("{") && message.endsWith("}"))
+  if (message[0] == '{' && message[length - 1] == '}')
   {
     StaticJsonDocument<2048> doc;
     DeserializationError error = deserializeJson(doc, message);
@@ -390,14 +430,12 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     }
   }
   // If message contains '|' use strtok() to split tokens
-  else if (message.indexOf('|') != -1)
+  else if (strchr(message, '|') != NULL)
   {
-    char buf[message.length() + 1];
-    message.toCharArray(buf, sizeof(buf));
     const int maxTokens = 5;
     String tokens[maxTokens];
     int index = 0;
-    char *token = strtok(buf, "|");
+    char *token = strtok(message, "|");
     while (token != NULL && index < maxTokens)
     {
       tokens[index++] = String(token);
@@ -405,12 +443,73 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     }
     if (index == maxTokens && tokens[0] == "e" && tokens[1] == "gh")
     {
-      handleGithubEvent(message);
+      // Parse and display directly since we already have tokens
+      String _color = tokens[2];
+      String _line = tokens[3];
+      String _order = tokens[4];
+
+      // Set color
+      if (_color == "RED")
+        canvas.setTextColor(RED);
+      else if (_color == "GREEN")
+        canvas.setTextColor(GREEN);
+      else if (_color == "YELLOW")
+        canvas.setTextColor(YELLOW);
+      else if (_color == "CYAN")
+        canvas.setTextColor(CYAN);
+      else if (_color == "WHITE")
+        canvas.setTextColor(WHITE);
+      else if (_color == "BLACK")
+        canvas.setTextColor(BLACK);
+      else if (_color == "ORANGE")
+        canvas.setTextColor(ORANGE);
+      else if (_color == "DARKGREY")
+        canvas.setTextColor(DARKGREY);
+      else if (_color == "PURPLE")
+        canvas.setTextColor(PURPLE);
+      else
+        canvas.setTextColor(WHITE);
+
+      // Play sound for first message
+      if (_order == "1")
+      {
+        M5.Speaker.begin();
+        if (_color == "RED")
+        {
+          M5.Speaker.tone(8000, 400);
+          delay(250);
+          M5.Speaker.tone(6000, 600);
+        }
+        else if (_color == "GREEN")
+        {
+          M5.Speaker.tone(8000, 100);
+          delay(150);
+          M5.Speaker.tone(10000, 100);
+          delay(150);
+          M5.Speaker.tone(12000, 200);
+        }
+        else
+        {
+          M5.Speaker.tone(5000, 150);
+          delay(200);
+          M5.Speaker.tone(5000, 150);
+        }
+        M5.Speaker.end();
+      }
+      
+      // Display message
+      canvas.printf("%s\n", _line.c_str());
+      if (_order == "1")
+      {
+        canvas.printf("---------------------------------\n");
+      }
+      canvas.pushSprite(0, 25);
     }
   }
-  if (message == "clear")
+  else if (strcmp(message, "clear") == 0)
   {
     canvas.clear();
+    canvas.pushSprite(0, 25);
   }
 
   M5.Display.setBrightness(fullBrightness);
@@ -422,11 +521,13 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
  ******************************************************************************/
 void handleGithubEvent(String message)
 {
-  char buf[message.length() + 1];
-  message.toCharArray(buf, sizeof(buf));
+  // Work with message directly - avoid buffer copy to save memory
   const int maxTokens = 5;
   String tokens[maxTokens];
   int index = 0;
+  // Create mutable copy only for strtok
+  char buf[message.length() + 1];
+  message.toCharArray(buf, sizeof(buf));
   char *token = strtok(buf, "|");
   while (token != NULL && index < maxTokens)
   {
@@ -536,12 +637,14 @@ void handleGithubEventJSON(const StaticJsonDocument<2048> &event)
     else
       canvas.setTextColor(WHITE);
   }
-  // if (event["lines"].is<JsonArray>()) {
-  //   for (JsonVariant v : event["lines"].as<JsonArray>()) {
-  //     canvas.printf("%s\n", v.as<const char*>());
-  //   }
-  // }
+  
+  // Display event message if available
+  if (event["message"].is<const char*>()) {
+    canvas.printf("%s\n", event["message"].as<const char*>());
+  }
+  
   canvas.setTextColor(WHITE);
+  canvas.pushSprite(0, 25);
 }
 
 /******************************************************************************
@@ -549,37 +652,57 @@ void handleGithubEventJSON(const StaticJsonDocument<2048> &event)
  ******************************************************************************/
 void loop()
 {
-  M5.update();
-  // Check if BtnB was pressed to increase brightness
+  // Reduce M5.update() calls - only update every 100ms
+  static unsigned long lastM5Update = 0;
+  unsigned long currentMillis = millis();
+  if (currentMillis - lastM5Update >= 100) {
+    M5.update();
+    lastM5Update = currentMillis;
+    
+    // Check if BtnA was pressed to wake up screen
     if (M5.BtnA.wasPressed()) {
       M5.Display.setBrightness(fullBrightness);
       lastBrightnessChange = millis(); // reset timeout timer
     }
+  }
     
   unsigned long elapsed = millis() - lastBrightnessChange;
   
-  // If the full-brightness period has passed, begin fading gradually
+  // Check charging status and manage screen dimming
   int16_t batVoltage = M5.Power.getBatteryVoltage();
-  isCharging=(batVoltage >= 4200)?true:false;
-  if(!isCharging){
-    if (elapsed > brightnessTimeout) {
+  isCharging = (batVoltage >= 4200) ? true : false;
+  
+  static uint8_t lastBrightness = fullBrightness;
+  uint8_t targetBrightness = fullBrightness;
+  
+  if (isCharging) {
+    // Keep screen at full brightness when charging
+    targetBrightness = fullBrightness;
+  } else {
+    // On battery: enable dimming to save power
+    if (enableDimming && elapsed > brightnessTimeout) {
       unsigned long fadeTime = elapsed - brightnessTimeout;
       if (fadeTime < fadeDuration) {
         // Compute new brightness linearly between fullBrightness and dimBrightness
-        uint8_t newBrightness = fullBrightness - ((fullBrightness - dimBrightness) * fadeTime) / fadeDuration;
-        M5.Display.setBrightness(newBrightness);
+        targetBrightness = fullBrightness - ((fullBrightness - dimBrightness) * fadeTime) / fadeDuration;
       } else {
         // Fade completed: set brightness to dim value
-        M5.Display.setBrightness(dimBrightness);
+        targetBrightness = dimBrightness;
       }
     }
+  }
+  
+  // Only update brightness if it changed (reduces flickering)
+  if (targetBrightness != lastBrightness) {
+    M5.Display.setBrightness(targetBrightness);
+    lastBrightness = targetBrightness;
   }
   if (wifiConnect())
   {
     if (!mqttClient.connected())
     {
       long now = millis();
-      if (now - mqttLastReconnectAttempt > 5000)
+      if (now - mqttLastReconnectAttempt > 15000) // Increased from 5000 to 15000 (15 seconds)
       {
         mqttLastReconnectAttempt = now;
         if (mqttReconnect())
@@ -587,7 +710,6 @@ void loop()
         else
         {
           Serial.println("MQTT Connection failed");
-          delay(3000); // Use delay() instead of sleep()
         }
       }
     }
@@ -596,6 +718,7 @@ void loop()
       mqttClient.loop();
     }
   }
- 
   
+  // Reduce CPU usage when idle
+  delay(50);
 }
