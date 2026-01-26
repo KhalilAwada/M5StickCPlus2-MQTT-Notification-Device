@@ -180,6 +180,10 @@ void setup()
     Serial.println("WiFi connected");
     Serial.println("IP address: ");
     Serial.println(WiFi.localIP());
+    canvas.setTextColor(GREEN);
+    canvas.printf("WiFi connected: %s\n", WiFi.SSID().c_str());
+    canvas.setTextColor(WHITE);
+    canvas.pushSprite(0, 25);
   }
 }
 
@@ -323,11 +327,21 @@ void displayBatteryStatus()
 
 bool wifiConnect()
 {
+  static bool wasConnected = false;
   bool connected = (wifiMulti.run(connectTimeoutMs) == WL_CONNECTED);
-  if (connected)
+  if (connected) {
     mqttLastReconnectAttempt = 0;
-  else
+    if (!wasConnected) {
+      canvas.setTextColor(GREEN);
+      canvas.printf("WiFi connected: %s\n", WiFi.SSID().c_str());
+      canvas.setTextColor(WHITE);
+      canvas.pushSprite(0, 25);
+    }
+    wasConnected = true;
+  } else {
+    wasConnected = false;
     delay(2000);
+  }
   static unsigned long lastDisplayUpdate = 0;
   unsigned long currentMillis = millis();
   if (currentMillis - lastDisplayUpdate >= 30000) // Increased from 10000 to 30000 (30 seconds)
@@ -372,6 +386,10 @@ boolean mqttReconnect()
   {
     Serial.println("MQTT Connected");
     mqttClient.subscribe(MQTT_TOPIC);
+    canvas.setTextColor(BLUE);
+    canvas.printf("MQTT connected, subscribed: %s\n", MQTT_TOPIC);
+    canvas.setTextColor(WHITE);
+    canvas.pushSprite(0, 25);
   }
   else
   {
