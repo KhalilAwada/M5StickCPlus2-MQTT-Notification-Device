@@ -3,7 +3,7 @@
 
 #include <Arduino.h>
 #include "FS.h"
-#include "SPIFFS.h"
+#include <LittleFS.h>
 
 #define FORMAT_SPIFFS_IF_FAILED true
 

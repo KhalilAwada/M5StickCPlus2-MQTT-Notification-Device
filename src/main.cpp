@@ -9,7 +9,14 @@
 #include <M5UnitLCD.h>
 #include <M5Unified.h>
 #include <PubSubClient.h>
-// Removed unused headers
+#include <vector>
+
+#ifndef MQTT_TLS
+#define MQTT_TLS 0
+#endif
+#if MQTT_TLS
+#include <WiFiClientSecure.h>
+#endif
 
 /******************************************************************************
  *                           CONFIGURATION MACROS
@@ -58,50 +65,62 @@
 #define MQTT_RETAIN false
 #endif
 
-#ifndef MQTT_TLS
-#define MQTT_TLS true
-#endif
-
 #ifndef MQTT_TLS_INSECURE
-#define MQTT_TLS_INSECURE false
-#endif
-
-#ifndef MQTT_TLS_CERT_REQS
-#define MQTT_TLS_CERT_REQS ssl.CERT_REQUIRED
-#endif
-
-#ifndef MQTT_TLS_VERSION
-#define MQTT_TLS_VERSION ssl.PROTOCOL_TLS
+#define MQTT_TLS_INSECURE 0
 #endif
 
 /******************************************************************************
  *                    GLOBAL OBJECTS & VARIABLES
  ******************************************************************************/
-SPIFFSManager spiffsManager(SPIFFS);
+SPIFFSManager spiffsManager(LittleFS);
 
+#if MQTT_TLS
+WiFiClientSecure wifiClient;
+#else
 WiFiClient wifiClient;
+#endif
 WiFiMulti wifiMulti;
 PubSubClient mqttClient(wifiClient);
 M5Canvas canvas(&M5.Display);
+M5Canvas statusBar(&M5.Display);   // double-buffered top status bar (kills flicker)
+static constexpr int kStatusBarHeight = 24;
+// Dark navy gives the status bar subtle definition vs. the black canvas
+// without measurably affecting power (same number of pixels written).
+static constexpr uint16_t kStatusBarBG = 0x0841; // ~rgb(8,8,12)
+#ifndef FIRMWARE_VERSION
+#define FIRMWARE_VERSION "v1.1"
+#endif
 long mqttLastReconnectAttempt = 0;
 bool isCharging = false;
 bool enableDimming = true; // Enable dimming when on battery
 const uint32_t connectTimeoutMs = 10000;
 
+// Cached status-bar state. Status bar is only redrawn when one of these
+// fields actually changes, so the LCD bus is idle when nothing has moved.
+struct StatusBarState {
+  bool wifiConnected;
+  int  wifiBars;       // 0..4
+  bool mqttConnected;
+  int  batLevel;       // 0..100
+  bool charging;
+};
+static StatusBarState lastStatus = {false, -1, false, -1, false};
+
 /******************************************************************************
  *                        FUNCTION PROTOTYPES
  ******************************************************************************/
-StaticJsonDocument<1024> loadWifiConfig(SPIFFSManager &spiffsManager);
+JsonDocument loadWifiConfig(SPIFFSManager &spiffsManager);
 bool wifiConnect();
 boolean mqttReconnect();
 void mqttCallback(char *topic, byte *payload, unsigned int length);
 void displayWifiStatus();
-StaticJsonDocument<1024> updateWifiConfig(SPIFFSManager &spiffsManager, const char *ssid, const char *password);
+JsonDocument updateWifiConfig(SPIFFSManager &spiffsManager, const char *ssid, const char *password);
 void displayBatteryStatus();
 void displayMQTTStatus();
-void handleGithubEventJSON(const StaticJsonDocument<2048> &event);
-void handleGithubEvent(String message);
+void handleGithubEventJSON(const JsonDocument &event);
 void scanWifiNetworks();
+void drawStatusBar();
+void refreshStatusBar(bool force = false);
 // In your main loop, check for idle time and dim the screen:
 
 // Global variable to track last brightness change time
@@ -129,48 +148,94 @@ void setup()
     M5.Speaker.config(spk_cfg);
   }
   M5.Power.begin();
-  // M5.Speaker.begin();
+  // Start the speaker once at boot. The previous code called begin()/end()
+  // around every tone which slowed the MQTT callback and could miss notes.
+  M5.Speaker.begin();
 
   delay(3000);
   Serial.println("Started");
 
   M5.setPrimaryDisplayType({m5::board_t::board_M5UnitLCD});
   M5.Display.setRotation(3);
-  int textSize = M5.Display.height() / 68;
-  if (textSize == 0)
-    textSize = 1;
-  M5.Display.setTextSize(textSize);
   M5.Display.setColorDepth(8);
+  M5.Display.fillScreen(BLACK);
+
+  /**************************************************************************
+   *                Initialize the Status Bar Sprite (double-buffered)
+   **************************************************************************/
+  statusBar.setColorDepth(8);
+  statusBar.createSprite(M5.Display.width(), kStatusBarHeight);
+  statusBar.fillSprite(kStatusBarBG);
+  statusBar.pushSprite(0, 0);
+  // 1-px divider between status bar and message canvas
+  M5.Display.drawFastHLine(0, kStatusBarHeight, M5.Display.width(), DARKGREY);
 
   /**************************************************************************
    *                Initialize the Scrollable Text Canvas
    **************************************************************************/
-  // If possible, lower the color depth (e.g., to 4 or 2 bits) to reduce RAM
   canvas.setColorDepth(8);
-  canvas.createSprite(M5.Display.width(), M5.Display.height() - 25);
-  canvas.setTextSize((float)canvas.width() / 200);
+  canvas.createSprite(M5.Display.width(), M5.Display.height() - (kStatusBarHeight + 1));
+  canvas.setFont(&fonts::FreeSans9pt7b); // crisper than scaled bitmap font
+  canvas.setTextSize(1);
+  canvas.setTextColor(WHITE);
   canvas.setTextScroll(true);
+  canvas.fillSprite(BLACK);
+  canvas.pushSprite(0, kStatusBarHeight + 1);
 
-  if (!SPIFFS.begin(FORMAT_SPIFFS_IF_FAILED))
+  /**************************************************************************
+   *                Boot splash (one-time, ~800 ms)
+   **************************************************************************/
   {
-    Serial.println("SPIFFS Mount Failed");
-    canvas.println("SPIFFS Mount Failed");
+    canvas.fillSprite(BLACK);
+    canvas.setTextDatum(middle_center);
+    int cx = canvas.width() / 2;
+    int cy = canvas.height() / 2;
+    canvas.setTextColor(CYAN);
+    canvas.setFont(&fonts::FreeSansBold12pt7b);
+    canvas.drawString("M5 Notify", cx, cy - 14);
+    canvas.setFont(&fonts::FreeSans9pt7b);
+    canvas.setTextColor(DARKGREY);
+    canvas.drawString(FIRMWARE_VERSION, cx, cy + 14);
+    canvas.setTextDatum(top_left);
+    canvas.setTextColor(WHITE);
+    canvas.pushSprite(0, kStatusBarHeight + 1);
+    delay(800);
+    canvas.fillSprite(BLACK);
+    canvas.pushSprite(0, kStatusBarHeight + 1);
+  }
+
+  if (!LittleFS.begin(FORMAT_SPIFFS_IF_FAILED))
+  {
+    Serial.println("LittleFS Mount Failed");
+    canvas.println("FS Mount Failed");
     return;
   }
 
   WiFi.mode(WIFI_STA);
 
 
-  StaticJsonDocument<1024> wifiJSON = loadWifiConfig(spiffsManager);
+  JsonDocument wifiJSON = loadWifiConfig(spiffsManager);
   for (JsonObject network : wifiJSON.as<JsonArray>())
   {
     const char *ssid = network["ssid"];
     const char *password = network["password"];
-    Serial.printf("Adding Network SSID: >%s< >%s<\n", ssid,password);
-    wifiMulti.addAP(ssid, password);
+    Serial.printf("Adding Network SSID: >%s<\n", ssid ? ssid : "");
+    if (ssid && password) {
+      wifiMulti.addAP(ssid, password);
+    }
   }
 
-  mqttClient.setServer(MQTT_HOST, 1883);
+#if MQTT_TLS
+#if MQTT_TLS_INSECURE
+  // WARNING: skips certificate validation. Acceptable only for local/dev brokers.
+  wifiClient.setInsecure();
+#else
+  // TODO: load broker CA via wifiClient.setCACert(...) for production use.
+  // Falling back to insecure mode if no CA is provided.
+  wifiClient.setInsecure();
+#endif
+#endif
+  mqttClient.setServer(MQTT_HOST, MQTT_PORT);
   mqttClient.setCallback(mqttCallback);
 
   // Connect to Wi-Fi using wifiMulti (connects to the SSID with strongest connection)
@@ -183,17 +248,18 @@ void setup()
     canvas.setTextColor(GREEN);
     canvas.printf("WiFi connected: %s\n", WiFi.SSID().c_str());
     canvas.setTextColor(WHITE);
-    canvas.pushSprite(0, 25);
+    canvas.pushSprite(0, kStatusBarHeight + 1);
   }
+  refreshStatusBar(true); // initial paint
 }
 
 
 /******************************************************************************
  *                         HELPER FUNCTIONS
  ******************************************************************************/
-StaticJsonDocument<1024> updateWifiConfig(SPIFFSManager &spiffsManager, const char *ssid, const char *password)
+JsonDocument updateWifiConfig(SPIFFSManager &spiffsManager, const char *ssid, const char *password)
 {
-  StaticJsonDocument<1024> wifiDoc;
+  JsonDocument wifiDoc;
   if (!spiffsManager.fileExists("/wifi.json"))
   {
     canvas.println("wifi.json does not exist, creating new file.");
@@ -215,7 +281,7 @@ StaticJsonDocument<1024> updateWifiConfig(SPIFFSManager &spiffsManager, const ch
   bool found = false;
   for (JsonObject cred : array)
   {
-    if (cred["ssid"] && strcmp(cred["ssid"], ssid) == 0)
+    if (cred["ssid"].is<const char *>() && strcmp(cred["ssid"], ssid) == 0)
     {
       cred["password"] = password;
       found = true;
@@ -224,7 +290,7 @@ StaticJsonDocument<1024> updateWifiConfig(SPIFFSManager &spiffsManager, const ch
   }
   if (!found)
   {
-    JsonObject newCred = array.createNestedObject();
+    JsonObject newCred = array.add<JsonObject>();
     newCred["ssid"] = ssid;
     newCred["password"] = password;
   }
@@ -235,123 +301,204 @@ StaticJsonDocument<1024> updateWifiConfig(SPIFFSManager &spiffsManager, const ch
   return wifiDoc;
 }
 
-StaticJsonDocument<1024> loadWifiConfig(SPIFFSManager &spiffsManager)
+JsonDocument loadWifiConfig(SPIFFSManager &spiffsManager)
 {
-  StaticJsonDocument<1024> wifiDoc;
-  wifiDoc = updateWifiConfig(spiffsManager, WIFI_SSID, WIFI_PASS);
-  String wifis = spiffsManager.readFile("/wifi.json");
-  Serial.printf("Read wifi file content: '%s'\n", wifis.c_str());
-  DeserializationError error = deserializeJson(wifiDoc, wifis);
-  if (error)
+  JsonDocument wifiDoc;
+
+  // Only seed the SPIFFS file with env-var defaults the first time around;
+  // afterwards we trust the persisted config and don't overwrite it.
+  bool needsSeed = !spiffsManager.fileExists("/wifi.json");
+  if (!needsSeed)
   {
-    Serial.printf("JSON parsing error: %s\n", error.c_str());
-    canvas.println("Error parsing wifi config");
-  }
-  else
-  {
-    for (JsonObject network : wifiDoc.as<JsonArray>())
+    String existing = spiffsManager.readFile("/wifi.json");
+    if (existing.length() == 0)
     {
-      Serial.printf("Loaded Network SSID: %s\n", network["ssid"].as<const char *>());
+      needsSeed = true;
     }
-    canvas.printf("Loaded %d wifi networks\n", wifiDoc.as<JsonArray>().size());
+    else
+    {
+      DeserializationError err = deserializeJson(wifiDoc, existing);
+      if (err || !wifiDoc.is<JsonArray>() || wifiDoc.as<JsonArray>().size() == 0)
+      {
+        needsSeed = true;
+        wifiDoc.clear();
+      }
+    }
   }
-  canvas.pushSprite(0, 25);
+
+  if (needsSeed)
+  {
+    Serial.println("Seeding /wifi.json with env-var defaults.");
+    wifiDoc = updateWifiConfig(spiffsManager, WIFI_SSID, WIFI_PASS);
+  }
+
+  for (JsonObject network : wifiDoc.as<JsonArray>())
+  {
+    Serial.printf("Loaded Network SSID: %s\n", network["ssid"].as<const char *>());
+  }
+  canvas.printf("Loaded %d wifi networks\n", (int)wifiDoc.as<JsonArray>().size());
+  canvas.pushSprite(0, kStatusBarHeight + 1);
   return wifiDoc;
 }
 
-void displayMQTTStatus()
+// Render the entire status bar into the off-screen sprite, then push it as
+// a single transfer. This eliminates the clear-then-redraw flicker the
+// previous implementation produced when drawing directly on M5.Display.
+void drawStatusBar()
 {
-  int indicatorSize = 8;
-  int batteryIconWidth = 24;
-  int x = M5.Display.width() - batteryIconWidth - 25 - indicatorSize - 10;
-  int y = 3;
-  uint16_t color = mqttClient.connected() ? BLUE : DARKGREY;
-  M5.Display.fillCircle(x + indicatorSize / 2, y + indicatorSize / 2, indicatorSize / 2, color);
-}
+  statusBar.fillSprite(kStatusBarBG);
 
-void displayWifiStatus()
-{
-  int iconSize = 20;
-  int iconX = M5.Display.width() - iconSize;
-  int iconY = 0;
-  M5.Display.fillRect(iconX, iconY, iconSize, iconSize, BLACK);
-  if (WiFi.status() == WL_CONNECTED)
+  // ---- Battery icon (right side) ----
+  const int batIconW = 24, batIconH = 14;
+  const int batX = M5.Display.width() - batIconW - 4;
+  const int batY = (kStatusBarHeight - batIconH) / 2;
+  const int bodyW = batIconW - 4, bodyH = batIconH;
+  uint16_t batColor;
+  if (lastStatus.batLevel <= 15)      batColor = RED;
+  else if (lastStatus.batLevel <= 30) batColor = YELLOW;
+  else                                batColor = GREEN;
+  statusBar.drawRect(batX, batY, bodyW, bodyH, DARKGREY);
+  statusBar.fillRect(batX + bodyW, batY + (bodyH / 2) - 2, 3, 4, DARKGREY);
+  int fillWidth = ((bodyW - 2) * lastStatus.batLevel) / 100;
+  if (fillWidth < 0) fillWidth = 0;
+  statusBar.fillRect(batX + 1, batY + 1, fillWidth, bodyH - 2, batColor);
+  if (lastStatus.charging)
   {
-    int rssi = WiFi.RSSI();
-    int bars = (rssi >= -50) ? 4 : (rssi >= -60) ? 3
-                               : (rssi >= -70)   ? 2
-                                                 : 1;
+    int cx = batX + bodyW / 2, cy = batY + bodyH / 2;
+    statusBar.drawLine(cx - 4, batY + 2, cx, cy, DARKGREEN);
+    statusBar.drawLine(cx, cy, cx - 2, batY + bodyH - 2, DARKGREEN);
+    statusBar.drawLine(cx - 3, batY + 2, cx, cy, DARKGREEN);
+    statusBar.drawLine(cx + 1, cy, cx - 2, batY + bodyH - 2, DARKGREEN);
+  }
+
+  // ---- WiFi bars (left of battery) ----
+  const int wifiW = 20;
+  const int wifiX = batX - wifiW - 6;
+  const int wifiY = 0;
+  if (lastStatus.wifiConnected)
+  {
     for (int i = 0; i < 4; i++)
     {
-      int barWidth = 2, spacing = 2;
-      int x = iconX + spacing + i * (barWidth + spacing);
-      int baseY = iconY + iconSize - spacing - 6;
-      int barHeight = 2 * (i + 1);
-      if (i < bars)
-        M5.Display.fillRect(x, baseY - barHeight, barWidth, barHeight, GREEN);
+      int barW = 2, spacing = 2;
+      int x = wifiX + spacing + i * (barW + spacing);
+      int baseY = wifiY + kStatusBarHeight - spacing - 4;
+      int barH = 2 * (i + 1);
+      if (i < lastStatus.wifiBars)
+        statusBar.fillRect(x, baseY - barH, barW, barH, GREEN);
       else
-        M5.Display.drawRect(x, baseY - barHeight, barWidth, barHeight, WHITE);
+        statusBar.drawRect(x, baseY - barH, barW, barH, DARKGREY);
     }
   }
   else
   {
-    int padding = 4;
-    int startX = iconX + padding, startY = iconY + padding;
-    int endX = iconX + iconSize - padding, endY = iconY + iconSize - padding;
-    M5.Display.drawLine(startX, startY, endX, endY, RED);
-    M5.Display.drawLine(endX, startY, startX, endY, RED);
+    int pad = 4;
+    int sx = wifiX + pad, sy = wifiY + pad;
+    int ex = wifiX + wifiW - pad, ey = wifiY + kStatusBarHeight - pad;
+    statusBar.drawLine(sx, sy, ex, ey, RED);
+    statusBar.drawLine(ex, sy, sx, ey, RED);
+  }
+
+  // ---- MQTT indicator dot (left of WiFi) ----
+  const int dotSize = 8;
+  int dotX = wifiX - dotSize - 6;
+  int dotY = (kStatusBarHeight - dotSize) / 2;
+  uint16_t dotColor = lastStatus.mqttConnected ? CYAN : DARKGREY;
+  statusBar.fillCircle(dotX + dotSize / 2, dotY + dotSize / 2, dotSize / 2, dotColor);
+
+  // ---- Left-side label: SSID prefix when connected, else "offline" ----
+  // Drawn inside the throttled refresh, so it only repaints when state
+  // actually changes. No new ongoing battery cost.
+  statusBar.setFont(&fonts::Font0); // small built-in 6x8
+  statusBar.setTextDatum(middle_left);
+  if (lastStatus.wifiConnected)
+  {
+    statusBar.setTextColor(WHITE, kStatusBarBG);
+    String ssid = WiFi.SSID();
+    if (ssid.length() > 9) ssid = ssid.substring(0, 9);
+    statusBar.drawString(ssid.c_str(), 4, kStatusBarHeight / 2);
+  }
+  else
+  {
+    statusBar.setTextColor(DARKGREY, kStatusBarBG);
+    statusBar.drawString("offline", 4, kStatusBarHeight / 2);
+  }
+  statusBar.setTextDatum(top_left);
+
+  statusBar.pushSprite(0, 0);
+}
+
+// Sample current state and only redraw if anything actually changed.
+// Cheap to call frequently; the LCD bus stays idle when the bar is stable.
+void refreshStatusBar(bool force)
+{
+  StatusBarState s;
+  s.wifiConnected = (WiFi.status() == WL_CONNECTED);
+  int rssi = s.wifiConnected ? WiFi.RSSI() : -200;
+  s.wifiBars = (rssi >= -50) ? 4
+             : (rssi >= -60) ? 3
+             : (rssi >= -70) ? 2
+             : (rssi >= -85) ? 1
+                             : 0;
+  s.mqttConnected = mqttClient.connected();
+  s.batLevel = (int)M5.Power.getBatteryLevel();
+  s.charging = isCharging;
+
+  if (force || memcmp(&s, &lastStatus, sizeof(s)) != 0)
+  {
+    lastStatus = s;
+    drawStatusBar();
   }
 }
 
-void displayBatteryStatus()
-{
-  int batteryIconWidth = 24, batteryIconHeight = 14;
-  int batteryX = M5.Display.width() - batteryIconWidth - 25, batteryY = 3;
-  M5.Display.fillRect(batteryX, batteryY, batteryIconWidth, batteryIconHeight, BLACK);
-  std::int32_t batLevel = M5.Power.getBatteryLevel();
-  // int16_t batVoltage = M5.Power.getBatteryVoltage();
-  int bodyWidth = batteryIconWidth - 4, bodyHeight = batteryIconHeight - 4;
-  M5.Display.drawRect(batteryX, batteryY, bodyWidth, bodyHeight, DARKGREY);
-  M5.Display.fillRect(batteryX + bodyWidth, batteryY + (bodyHeight / 2) - 2, 3, 4, DARKGREY);
-  int fillWidth = ((bodyWidth - 2) * batLevel) / 100;
-  M5.Display.fillRect(batteryX + 1, batteryY + 1, fillWidth, bodyHeight - 2, GREEN);
-  if (isCharging)
-  {
-    int centerX = batteryX + bodyWidth / 2, centerY = batteryY + bodyHeight / 2;
-    M5.Display.drawLine(centerX - 4, batteryY + 2, centerX, centerY, DARKGREEN);
-    M5.Display.drawLine(centerX, centerY, centerX - 2, batteryY + bodyHeight - 2, DARKGREEN);
-    M5.Display.drawLine(centerX - 3, batteryY + 2, centerX, centerY, DARKGREEN);
-    M5.Display.drawLine(centerX + 1, centerY, centerX - 2, batteryY + bodyHeight - 2, DARKGREEN);
-  }
-}
+// Legacy wrappers retained for any external callers; route through the
+// change-detected refresh so they don't bypass the cache.
+void displayMQTTStatus()    { refreshStatusBar(true); }
+void displayWifiStatus()    { refreshStatusBar(true); }
+void displayBatteryStatus() { refreshStatusBar(true); }
 
 bool wifiConnect()
 {
   static bool wasConnected = false;
-  bool connected = (wifiMulti.run(connectTimeoutMs) == WL_CONNECTED);
-  if (connected) {
-    mqttLastReconnectAttempt = 0;
+  static unsigned long lastReconnectAttempt = 0;
+  const unsigned long reconnectIntervalMs = 5000;
+
+  if (WiFi.status() == WL_CONNECTED)
+  {
     if (!wasConnected) {
+      mqttLastReconnectAttempt = 0;
       canvas.setTextColor(GREEN);
       canvas.printf("WiFi connected: %s\n", WiFi.SSID().c_str());
       canvas.setTextColor(WHITE);
-      canvas.pushSprite(0, 25);
+      canvas.pushSprite(0, kStatusBarHeight + 1);
+      wasConnected = true;
     }
-    wasConnected = true;
-  } else {
-    wasConnected = false;
-    delay(2000);
   }
-  static unsigned long lastDisplayUpdate = 0;
-  unsigned long currentMillis = millis();
-  if (currentMillis - lastDisplayUpdate >= 30000) // Increased from 10000 to 30000 (30 seconds)
+  else
   {
-    displayWifiStatus();
-    displayBatteryStatus();
-    displayMQTTStatus();
-    lastDisplayUpdate = currentMillis;
+    wasConnected = false;
+    unsigned long now = millis();
+    // Throttle reconnect attempts so we don't block the main loop on every
+    // pass. wifiMulti.run() with a small timeout will fall through quickly
+    // when no network is in range.
+    if (now - lastReconnectAttempt >= reconnectIntervalMs)
+    {
+      lastReconnectAttempt = now;
+      wifiMulti.run(1000);
+    }
   }
-  return connected;
+
+  // Poll the status bar at 2 Hz, but refreshStatusBar() only pushes pixels
+  // when an icon's underlying value has changed — so the LCD bus stays
+  // idle when the bar is stable. Net battery cost is lower than the old
+  // 30-second blind clear-and-redraw.
+  static unsigned long lastStatusPoll = 0;
+  unsigned long currentMillis = millis();
+  if (currentMillis - lastStatusPoll >= 2000)
+  {
+    refreshStatusBar();
+    lastStatusPoll = currentMillis;
+  }
+  return WiFi.status() == WL_CONNECTED;
 }
 
 void scanWifiNetworks() {
@@ -386,10 +533,10 @@ boolean mqttReconnect()
   {
     Serial.println("MQTT Connected");
     mqttClient.subscribe(MQTT_TOPIC);
-    canvas.setTextColor(BLUE);
-    canvas.printf("MQTT connected, subscribed: %s\n", MQTT_TOPIC);
+    canvas.setTextColor(CYAN);
+    canvas.printf("[OK] MQTT %s\n", MQTT_TOPIC);
     canvas.setTextColor(WHITE);
-    canvas.pushSprite(0, 25);
+    canvas.pushSprite(0, kStatusBarHeight + 1);
   }
   else
   {
@@ -401,133 +548,134 @@ boolean mqttReconnect()
 /******************************************************************************
  *                          MQTT CALLBACK
  ******************************************************************************/
+
+// Map a color name to an M5GFX color constant. Returns WHITE on miss.
+static uint16_t colorFromName(const char *name)
+{
+  if (!name) return WHITE;
+  if (strcmp(name, "RED") == 0) return RED;
+  if (strcmp(name, "GREEN") == 0) return GREEN;
+  if (strcmp(name, "YELLOW") == 0) return YELLOW;
+  if (strcmp(name, "CYAN") == 0) return CYAN;
+  if (strcmp(name, "WHITE") == 0) return WHITE;
+  if (strcmp(name, "BLACK") == 0) return BLACK;
+  if (strcmp(name, "ORANGE") == 0) return ORANGE;
+  if (strcmp(name, "DARKGREY") == 0) return DARKGREY;
+  if (strcmp(name, "PURPLE") == 0) return PURPLE;
+  return WHITE;
+}
+
+// Queue a non-blocking notification tone for the given color.
+// M5.Speaker.tone(freq, duration, channel, stop_current) with stop_current=false
+// queues notes back-to-back without delay() calls.
+static void playColorTone(const char *color)
+{
+  if (!color) return;
+  if (strcmp(color, "RED") == 0)
+  {
+    M5.Speaker.tone(8000, 400, 0, true);
+    M5.Speaker.tone(6000, 600, 0, false);
+  }
+  else if (strcmp(color, "GREEN") == 0)
+  {
+    M5.Speaker.tone(8000, 100, 0, true);
+    M5.Speaker.tone(10000, 100, 0, false);
+    M5.Speaker.tone(12000, 200, 0, false);
+  }
+  else
+  {
+    M5.Speaker.tone(5000, 150, 0, true);
+    M5.Speaker.tone(5000, 150, 0, false);
+  }
+}
+
+// Handle the legacy pipe-delimited "e|gh|<color>|<line>|<order>" format.
+static void handleGithubPipeMessage(char *message)
+{
+  const int maxTokens = 5;
+  char *tokens[maxTokens] = {nullptr};
+  int index = 0;
+  char *saveptr = nullptr;
+  char *token = strtok_r(message, "|", &saveptr);
+  while (token != nullptr && index < maxTokens)
+  {
+    tokens[index++] = token;
+    token = strtok_r(nullptr, "|", &saveptr);
+  }
+  if (index < maxTokens) return;
+  if (strcmp(tokens[0], "e") != 0 || strcmp(tokens[1], "gh") != 0) return;
+
+  const char *color = tokens[2];
+  const char *line = tokens[3];
+  const char *order = tokens[4];
+
+  canvas.setTextColor(colorFromName(color));
+  if (order && strcmp(order, "1") == 0)
+  {
+    playColorTone(color);
+  }
+  canvas.printf("%s\n", line);
+  if (order && strcmp(order, "1") == 0)
+  {
+    canvas.printf("---------------------------------\n");
+  }
+  canvas.setTextColor(WHITE);   // restore default so next line isn't tinted
+  canvas.pushSprite(0, kStatusBarHeight + 1);
+}
+
 void mqttCallback(char *topic, byte *payload, unsigned int length)
 {
-  // Null-terminate payload in place for efficiency (saves String allocation)
-  char message[length + 1];
-  memcpy(message, payload, length);
-  message[length] = '\0';
+  // Cap message size to avoid stack blow-up; oversize messages are dropped.
+  static constexpr size_t kMaxMessage = 4096;
+  if (length >= kMaxMessage)
+  {
+    Serial.printf("MQTT message too large (%u bytes); dropping.\n", length);
+    return;
+  }
+  std::vector<char> buf(length + 1);
+  memcpy(buf.data(), payload, length);
+  buf[length] = '\0';
+  char *message = buf.data();
   Serial.println(message);
 
-  // If the message is JSON
-  if (message[0] == '{' && message[length - 1] == '}')
+  // Try JSON first; fall back to legacy formats only if parse fails.
+  JsonDocument doc;
+  DeserializationError jsonErr = deserializeJson(doc, message, length);
+  if (!jsonErr)
   {
-    StaticJsonDocument<2048> doc;
-    DeserializationError error = deserializeJson(doc, message);
-    if (error)
+    const char *msgType = doc["msgType"].is<const char *>() ? doc["msgType"].as<const char *>() : nullptr;
+    const char *msgGroup = doc["msgGroup"].is<const char *>() ? doc["msgGroup"].as<const char *>() : nullptr;
+    if (msgType && msgGroup && strcmp(msgType, "event") == 0 && strcmp(msgGroup, "gh") == 0)
     {
-      Serial.print("deserializeJson() failed: ");
-      Serial.println(error.c_str());
+      Serial.println("message supported");
+      handleGithubEventJSON(doc);
+    }
+    else if (msgType && msgGroup && strcmp(msgType, "config") == 0 && strcmp(msgGroup, "wifi") == 0)
+    {
+      Serial.println("message supported");
+      if (doc["ssid"].is<const char *>() && doc["password"].is<const char *>())
+      {
+        updateWifiConfig(spiffsManager, doc["ssid"], doc["password"]);
+        loadWifiConfig(spiffsManager);
+      }
+      else
+      {
+        Serial.println("Invalid wifi config message");
+      }
     }
     else
     {
-      const char *msgType = doc["msgType"];
-      const char *msgGroup = doc["msgGroup"];
-      if (strcmp(msgType, "event") == 0 && strcmp(msgGroup, "gh") == 0)
-      {
-        Serial.println("message supported");
-        handleGithubEventJSON(doc);
-      }
-      else if (strcmp(msgType, "config") == 0 && strcmp(msgGroup, "wifi") == 0)
-      {
-        Serial.println("message supported");
-        if (doc.containsKey("ssid") && doc.containsKey("password"))
-        {
-          updateWifiConfig(spiffsManager, doc["ssid"], doc["password"]);
-          loadWifiConfig(spiffsManager);
-        }
-        else
-        {
-          Serial.println("Invalid wifi config message");
-        }
-      }
-      else
-      {
-        Serial.println("message not supported");
-      }
+      Serial.println("message not supported");
     }
   }
-  // If message contains '|' use strtok() to split tokens
-  else if (strchr(message, '|') != NULL)
+  else if (strchr(message, '|') != nullptr)
   {
-    const int maxTokens = 5;
-    String tokens[maxTokens];
-    int index = 0;
-    char *token = strtok(message, "|");
-    while (token != NULL && index < maxTokens)
-    {
-      tokens[index++] = String(token);
-      token = strtok(NULL, "|");
-    }
-    if (index == maxTokens && tokens[0] == "e" && tokens[1] == "gh")
-    {
-      // Parse and display directly since we already have tokens
-      String _color = tokens[2];
-      String _line = tokens[3];
-      String _order = tokens[4];
-
-      // Set color
-      if (_color == "RED")
-        canvas.setTextColor(RED);
-      else if (_color == "GREEN")
-        canvas.setTextColor(GREEN);
-      else if (_color == "YELLOW")
-        canvas.setTextColor(YELLOW);
-      else if (_color == "CYAN")
-        canvas.setTextColor(CYAN);
-      else if (_color == "WHITE")
-        canvas.setTextColor(WHITE);
-      else if (_color == "BLACK")
-        canvas.setTextColor(BLACK);
-      else if (_color == "ORANGE")
-        canvas.setTextColor(ORANGE);
-      else if (_color == "DARKGREY")
-        canvas.setTextColor(DARKGREY);
-      else if (_color == "PURPLE")
-        canvas.setTextColor(PURPLE);
-      else
-        canvas.setTextColor(WHITE);
-
-      // Play sound for first message
-      if (_order == "1")
-      {
-        M5.Speaker.begin();
-        if (_color == "RED")
-        {
-          M5.Speaker.tone(8000, 400);
-          delay(250);
-          M5.Speaker.tone(6000, 600);
-        }
-        else if (_color == "GREEN")
-        {
-          M5.Speaker.tone(8000, 100);
-          delay(150);
-          M5.Speaker.tone(10000, 100);
-          delay(150);
-          M5.Speaker.tone(12000, 200);
-        }
-        else
-        {
-          M5.Speaker.tone(5000, 150);
-          delay(200);
-          M5.Speaker.tone(5000, 150);
-        }
-        M5.Speaker.end();
-      }
-      
-      // Display message
-      canvas.printf("%s\n", _line.c_str());
-      if (_order == "1")
-      {
-        canvas.printf("---------------------------------\n");
-      }
-      canvas.pushSprite(0, 25);
-    }
+    handleGithubPipeMessage(message);
   }
   else if (strcmp(message, "clear") == 0)
   {
     canvas.clear();
-    canvas.pushSprite(0, 25);
+    canvas.pushSprite(0, kStatusBarHeight + 1);
   }
 
   M5.Display.setBrightness(fullBrightness);
@@ -535,134 +683,72 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
 }
 
 /******************************************************************************
- *              HANDLE GITHUB EVENT (String)
- ******************************************************************************/
-void handleGithubEvent(String message)
-{
-  // Work with message directly - avoid buffer copy to save memory
-  const int maxTokens = 5;
-  String tokens[maxTokens];
-  int index = 0;
-  // Create mutable copy only for strtok
-  char buf[message.length() + 1];
-  message.toCharArray(buf, sizeof(buf));
-  char *token = strtok(buf, "|");
-  while (token != NULL && index < maxTokens)
-  {
-    tokens[index++] = String(token);
-    token = strtok(NULL, "|");
-  }
-  if (index < maxTokens)
-    return;
-  String _color = tokens[2];
-  String _line = tokens[3];
-  String _order = tokens[4];
-
-  Serial.printf("Color: %s\n", _color.c_str());
-  Serial.printf("Line: %s\n", _line.c_str());
-  Serial.printf("Order: %s\n", _order.c_str());
-  if (_color == "RED")
-    canvas.setTextColor(RED);
-  else if (_color == "GREEN")
-    canvas.setTextColor(GREEN);
-  else if (_color == "YELLOW")
-    canvas.setTextColor(YELLOW);
-  else if (_color == "CYAN")
-    canvas.setTextColor(CYAN);
-  else if (_color == "WHITE")
-    canvas.setTextColor(WHITE);
-  else if (_color == "BLACK")
-    canvas.setTextColor(BLACK);
-  else if (_color == "ORANGE")
-    canvas.setTextColor(ORANGE);
-  else if (_color == "DARKGREY")
-    canvas.setTextColor(DARKGREY);
-  else if (_color == "PURPLE")
-    canvas.setTextColor(PURPLE);
-  else
-    canvas.setTextColor(WHITE);
-
-  // Note: Blocking delays in the tone sequences can cause instability.
-  // Consider using non-blocking timing if delays prove problematic.
-  if (_order == "1")
-  {
-
-    M5.Speaker.begin();
-    if (_color == "RED")
-    {
-      M5.Speaker.tone(8000, 400);
-      delay(250);
-      M5.Speaker.tone(6000, 600);
-    }
-    else if (_color == "GREEN")
-    {
-      M5.Speaker.tone(8000, 100);
-      delay(150);
-      M5.Speaker.tone(10000, 100);
-      delay(150);
-      M5.Speaker.tone(12000, 200);
-    }
-    else
-    {
-      M5.Speaker.tone(5000, 150);
-      delay(200);
-      M5.Speaker.tone(5000, 150);
-    }
-    M5.Speaker.end();
-  }
-  canvas.printf("%s\n", _line.c_str());
-  if (_order == "1")
-  {
-    canvas.printf("---------------------------------\n");
-  }
-  canvas.pushSprite(0, 25);
-}
-
-/******************************************************************************
  *              HANDLE GITHUB EVENT (JSON)
  ******************************************************************************/
-void handleGithubEventJSON(const StaticJsonDocument<2048> &event)
+void handleGithubEventJSON(const JsonDocument &event)
 {
-  const char *eventType = event["type"];
+  const char *eventType = event["type"].is<const char *>() ? event["type"].as<const char *>() : nullptr;
+  const char *glyph = "";
   if (eventType)
   {
     if (strcmp(eventType, "workflow_run") == 0)
     {
-      const char *status = event["status"];
+      const char *status = event["status"].is<const char *>() ? event["status"].as<const char *>() : nullptr;
       if (status)
       {
         if (strcmp(status, "queued") == 0)
+        {
           canvas.setTextColor(YELLOW);
+          glyph = "... ";
+        }
         else if (strcmp(status, "in_progress") == 0)
+        {
           canvas.setTextColor(ORANGE);
+          glyph = ">> ";
+        }
         else if (strcmp(status, "completed") == 0)
         {
-          const char *conclusion = event["conclusion"];
+          const char *conclusion = event["conclusion"].is<const char *>() ? event["conclusion"].as<const char *>() : nullptr;
           if (conclusion)
           {
             if (strcmp(conclusion, "success") == 0)
+            {
               canvas.setTextColor(GREEN);
+              glyph = "OK ";
+            }
             else if (strcmp(conclusion, "cancelled") == 0)
+            {
               canvas.setTextColor(DARKGREY);
+              glyph = "-- ";
+            }
             else
+            {
               canvas.setTextColor(RED);
+              glyph = "X  ";
+            }
           }
         }
       }
     }
     else if (strcmp(eventType, "push") == 0)
+    {
       canvas.setTextColor(CYAN);
+      glyph = "+ ";
+    }
     else
+    {
       canvas.setTextColor(WHITE);
+    }
   }
-  
+
   // Display event message if available
-  if (event["message"].is<const char*>()) {
-    canvas.printf("%s\n", event["message"].as<const char*>());
+  if (event["message"].is<const char *>())
+  {
+    canvas.printf("%s%s\n", glyph, event["message"].as<const char *>());
   }
-  
+
   canvas.setTextColor(WHITE);
-  canvas.pushSprite(0, 25);
+  canvas.pushSprite(0, kStatusBarHeight + 1);
 }
 
 /******************************************************************************
@@ -685,10 +771,10 @@ void loop()
   }
     
   unsigned long elapsed = millis() - lastBrightnessChange;
-  
-  // Check charging status and manage screen dimming
-  int16_t batVoltage = M5.Power.getBatteryVoltage();
-  isCharging = (batVoltage >= 4200) ? true : false;
+
+  // Check charging status via the power management chip rather than
+  // guessing from a raw battery voltage threshold.
+  isCharging = M5.Power.isCharging();
   
   static uint8_t lastBrightness = fullBrightness;
   uint8_t targetBrightness = fullBrightness;
