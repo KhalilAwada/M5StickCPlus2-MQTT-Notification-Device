@@ -666,6 +666,27 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     else
     {
       Serial.println("message not supported");
+      // Fallback: surface useful JSON fields so the user always sees something.
+      const char *fallback = nullptr;
+      if (doc["message"].is<const char *>())      fallback = doc["message"].as<const char *>();
+      else if (doc["text"].is<const char *>())    fallback = doc["text"].as<const char *>();
+      else if (doc["title"].is<const char *>())   fallback = doc["title"].as<const char *>();
+      else if (doc["body"].is<const char *>())    fallback = doc["body"].as<const char *>();
+
+      canvas.setTextColor(WHITE);
+      if (fallback)
+      {
+        canvas.printf("%s\n", fallback);
+      }
+      else
+      {
+        // Pretty-print compact JSON so the user can debug payload shape.
+        String out;
+        serializeJson(doc, out);
+        if (out.length() > 200) { out.remove(200); out += "..."; }
+        canvas.printf("%s\n", out.c_str());
+      }
+      canvas.pushSprite(0, kStatusBarHeight + 1);
     }
   }
   else if (strchr(message, '|') != nullptr)
@@ -675,6 +696,13 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
   else if (strcmp(message, "clear") == 0)
   {
     canvas.clear();
+    canvas.pushSprite(0, kStatusBarHeight + 1);
+  }
+  else
+  {
+    // Plain-text message that isn't JSON, pipe, or "clear" — show it raw.
+    canvas.setTextColor(WHITE);
+    canvas.printf("%s\n", message);
     canvas.pushSprite(0, kStatusBarHeight + 1);
   }
 
