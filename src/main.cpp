@@ -529,10 +529,14 @@ void scanWifiNetworks() {
 
 boolean mqttReconnect()
 {
+  // cleanSession=false (8th arg) so the broker retains our session and queues
+  // QoS>=1 messages while we're offline. Re-delivered on reconnect.
   if (mqttClient.connect(MQTT_CLIENT_ID, MQTT_USERNAME, MQTT_PASSWORD, MQTT_TOPIC, 1, false, "", false))
   {
     Serial.println("MQTT Connected");
-    mqttClient.subscribe(MQTT_TOPIC);
+    // Subscribe at QoS 1 so the broker actually queues messages for this
+    // session while we're disconnected (QoS 0 is fire-and-forget).
+    mqttClient.subscribe(MQTT_TOPIC, 1);
     canvas.setTextColor(CYAN);
     canvas.printf("[OK] MQTT %s\n", MQTT_TOPIC);
     canvas.setTextColor(WHITE);
