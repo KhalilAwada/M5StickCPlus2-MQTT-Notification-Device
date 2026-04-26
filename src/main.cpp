@@ -118,6 +118,7 @@ JsonDocument updateWifiConfig(SPIFFSManager &spiffsManager, const char *ssid, co
 void displayBatteryStatus();
 void displayMQTTStatus();
 void handleGithubEventJSON(const JsonDocument &event);
+void handleGrafanaEventJSON(const JsonDocument &event);
 void scanWifiNetworks();
 void drawStatusBar();
 void refreshStatusBar(bool force = false);
@@ -175,7 +176,7 @@ void setup()
    **************************************************************************/
   canvas.setColorDepth(8);
   canvas.createSprite(M5.Display.width(), M5.Display.height() - (kStatusBarHeight + 1));
-  canvas.setFont(&fonts::FreeSans9pt7b); // crisper than scaled bitmap font
+  canvas.setFont(&fonts::Font0); // compact 6x8 built-in — fits more text per line
   canvas.setTextSize(1);
   canvas.setTextColor(WHITE);
   canvas.setTextScroll(true);
@@ -237,6 +238,13 @@ void setup()
 #endif
   mqttClient.setServer(MQTT_HOST, MQTT_PORT);
   mqttClient.setCallback(mqttCallback);
+  // PubSubClient defaults to a 256-byte RX/TX buffer, which silently drops
+  // any larger MQTT payload. Match the callback cap (4 KB) so big JSON
+  // messages actually reach mqttCallback().
+  mqttClient.setBufferSize(4096);
+  // Give the broker more slack on slow Wi-Fi: 15 s socket timeout, 60 s keepalive.
+  mqttClient.setSocketTimeout(15);
+  mqttClient.setKeepAlive(60);
 
   // Connect to Wi-Fi using wifiMulti (connects to the SSID with strongest connection)
   Serial.println("Connecting Wifi...");
@@ -629,6 +637,8 @@ static void handleGithubPipeMessage(char *message)
 
 void mqttCallback(char *topic, byte *payload, unsigned int length)
 {
+  canvas.setFont(&fonts::Font2); // compact 6x8 built-in — fits more text per line
+
   // Cap message size to avoid stack blow-up; oversize messages are dropped.
   static constexpr size_t kMaxMessage = 4096;
   if (length >= kMaxMessage)
@@ -647,12 +657,25 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
   DeserializationError jsonErr = deserializeJson(doc, message, length);
   if (!jsonErr)
   {
-    const char *msgType = doc["msgType"].is<const char *>() ? doc["msgType"].as<const char *>() : nullptr;
-    const char *msgGroup = doc["msgGroup"].is<const char *>() ? doc["msgGroup"].as<const char *>() : nullptr;
-    if (msgType && msgGroup && strcmp(msgType, "event") == 0 && strcmp(msgGroup, "gh") == 0)
+    // Accept both legacy (msgType/msgGroup) and new (messageType/messageGroup)
+    // key names. Group "gh" and "github" are treated as equivalent.
+    const char *msgType = doc["msgType"].is<const char *>()
+                            ? doc["msgType"].as<const char *>()
+                            : (doc["messageType"].is<const char *>() ? doc["messageType"].as<const char *>() : nullptr);
+    const char *msgGroup = doc["msgGroup"].is<const char *>()
+                             ? doc["msgGroup"].as<const char *>()
+                             : (doc["messageGroup"].is<const char *>() ? doc["messageGroup"].as<const char *>() : nullptr);
+    const bool isGithubGroup = msgGroup && (strcmp(msgGroup, "gh") == 0 || strcmp(msgGroup, "github") == 0);
+    const bool isGrafanaGroup = msgGroup && strcmp(msgGroup, "grafana") == 0;
+    if (msgType && isGithubGroup && strcmp(msgType, "event") == 0)
     {
       Serial.println("message supported");
       handleGithubEventJSON(doc);
+    }
+    else if (msgType && isGrafanaGroup && strcmp(msgType, "event") == 0)
+    {
+      Serial.println("message supported");
+      handleGrafanaEventJSON(doc);
     }
     else if (msgType && msgGroup && strcmp(msgType, "config") == 0 && strcmp(msgGroup, "wifi") == 0)
     {
@@ -773,13 +796,111 @@ void handleGithubEventJSON(const JsonDocument &event)
     }
   }
 
-  // Display event message if available
-  if (event["message"].is<const char *>())
+  // Render text. Prefer the `lines` array (current producer format); fall
+  // back to a single `message` string for legacy payloads.
+  if (event["lines"].is<JsonArrayConst>())
+  {
+    JsonArrayConst lines = event["lines"].as<JsonArrayConst>();
+    bool first = true;
+    for (JsonVariantConst v : lines)
+    {
+      if (!v.is<const char *>()) continue;
+      const char *line = v.as<const char *>();
+      if (first)
+      {
+        canvas.printf("%s%s\n", glyph, line);
+        first = false;
+      }
+      else
+      {
+        canvas.printf("  %s\n", line);
+      }
+    }
+  }
+  else if (event["message"].is<const char *>())
   {
     canvas.printf("%s%s\n", glyph, event["message"].as<const char *>());
   }
 
   canvas.setTextColor(WHITE);
+  canvas.pushSprite(0, kStatusBarHeight + 1);
+}
+
+/******************************************************************************
+ *              HANDLE GRAFANA EVENT (JSON)
+ ******************************************************************************/
+// Parse a hex color string like "0xff9966" or "#ff9966". Returns true on
+// success and writes a canvas-native color value into `out`.
+static bool parseHexColor(const char *s, uint32_t &out)
+{
+  if (!s) return false;
+  if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
+  else if (s[0] == '#') s += 1;
+  if (strlen(s) < 6) return false;
+  char *end = nullptr;
+  unsigned long v = strtoul(s, &end, 16);
+  if (end == s) return false;
+  uint8_t r = (v >> 16) & 0xFF;
+  uint8_t g = (v >> 8) & 0xFF;
+  uint8_t b = v & 0xFF;
+  out = canvas.color888(r, g, b);
+  return true;
+}
+
+void handleGrafanaEventJSON(const JsonDocument &event)
+{
+  // Defaults if the producer omits colors.
+  uint32_t fg = WHITE;
+  uint32_t bg = BLACK;
+  bool haveBg = false;
+  if (event["color"].is<const char *>())
+  {
+    parseHexColor(event["color"].as<const char *>(), fg);
+  }
+  if (event["bgColor"].is<const char *>())
+  {
+    haveBg = parseHexColor(event["bgColor"].as<const char *>(), bg);
+  }
+
+  // Optional status glyph so a quick glance shows alert state.
+  const char *status = event["status"].is<const char *>() ? event["status"].as<const char *>() : nullptr;
+  const char *glyph = "";
+  if (status)
+  {
+    if (strcmp(status, "firing") == 0)        glyph = "!! ";
+    else if (strcmp(status, "resolved") == 0) glyph = "OK ";
+    else if (strcmp(status, "alerting") == 0) glyph = "!! ";
+  }
+
+  if (haveBg) canvas.setTextColor(fg, bg);
+  else        canvas.setTextColor(fg);
+
+  if (event["lines"].is<JsonArrayConst>())
+  {
+    JsonArrayConst lines = event["lines"].as<JsonArrayConst>();
+    bool first = true;
+    for (JsonVariantConst v : lines)
+    {
+      if (!v.is<const char *>()) continue;
+      const char *line = v.as<const char *>();
+      if (first)
+      {
+        canvas.printf("%s%s\n", glyph, line);
+        first = false;
+      }
+      else
+      {
+        canvas.printf("  %s\n", line);
+      }
+    }
+  }
+  else if (event["message"].is<const char *>())
+  {
+    canvas.printf("%s%s\n", glyph, event["message"].as<const char *>());
+  }
+
+  // Restore default text colors so subsequent prints aren't tinted.
+  canvas.setTextColor(WHITE, BLACK);
   canvas.pushSprite(0, kStatusBarHeight + 1);
 }
 
